@@ -344,13 +344,29 @@ func (cm *ConsensusManager) CalculateMerkleRoot(txs []Transaction) Hash {
 	}
 
 	if len(txs) == 1 {
-		return txs[0].CalculateHash()
+		// CRITICAL: Use hash if already set, otherwise calculate
+		if txs[0].Hash != (Hash{}) {
+			LogDebug("CalculateMerkleRoot: Using provided hash for single tx: %x", txs[0].Hash)
+			return txs[0].Hash
+		}
+		calculatedHash := txs[0].CalculateHash()
+		LogDebug("CalculateMerkleRoot: Calculated hash for single tx: %x", calculatedHash)
+		return calculatedHash
 	}
 
 	// Build merkle tree
 	hashes := make([][]byte, len(txs))
 	for i, tx := range txs {
-		hashes[i] = tx.CalculateHash().Bytes()
+		// CRITICAL: Use hash if already set (most reliable), otherwise calculate
+		// This ensures consistency when transactions are parsed from RPC
+		if tx.Hash != (Hash{}) {
+			hashes[i] = tx.Hash.Bytes()
+			LogDebug("CalculateMerkleRoot: Using provided hash for tx[%d]: %x", i, tx.Hash)
+		} else {
+			calculatedHash := tx.CalculateHash()
+			hashes[i] = calculatedHash.Bytes()
+			LogDebug("CalculateMerkleRoot: Calculated hash for tx[%d]: %x", i, calculatedHash)
+		}
 	}
 
 	for len(hashes) > 1 {

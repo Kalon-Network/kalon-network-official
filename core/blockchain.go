@@ -622,6 +622,10 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 
 	// Validate merkle root
 	expectedMerkleRoot := consensusManager.CalculateMerkleRoot(block.Txs)
+	LogDebug("validateBlockV2WithParent: Block #%d - Expected merkle root: %x, Got: %x, Tx count: %d", block.Header.Number, expectedMerkleRoot, block.Header.MerkleRoot, len(block.Txs))
+	for i, tx := range block.Txs {
+		LogDebug("validateBlockV2WithParent: Block #%d - Tx[%d] hash: %x (provided: %v)", block.Header.Number, i, tx.Hash, tx.Hash != (Hash{}))
+	}
 	if block.Header.MerkleRoot != expectedMerkleRoot {
 		return fmt.Errorf("invalid merkle root: expected %x, got %x", expectedMerkleRoot, block.Header.MerkleRoot)
 	}
@@ -1222,8 +1226,9 @@ func (bc *BlockchainV2) createBlockRewardTransaction(miner Address, amount uint6
 
 	LogDebug("createBlockRewardTransaction - Created TX with output address: %x", tx.Outputs[0].Address)
 
-	// Calculate transaction hash
-	tx.Hash = CalculateTransactionHash(&tx)
+	// CRITICAL: Use tx.CalculateHash() for consistency with CalculateMerkleRoot
+	// This ensures the hash matches when validating the merkle root
+	tx.Hash = tx.CalculateHash()
 
 	return tx
 }
