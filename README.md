@@ -124,6 +124,8 @@ Seed nodes are pre-configured in `genesis/testnet.json`. Your node will automati
 - **RPC**: 16316 (for wallet and miner communication)
 - **P2P**: 17335 (for network communication)
 
+**⚠️ IMPORTANT**: Port 22 (SSH) is NOT used by Kalon Network. Do NOT block or modify port 22, as you need it to connect to your server via SSH!
+
 ### Data Directory
 
 All blockchain data is stored in `data/testnet/`. Back up this directory regularly.
@@ -174,6 +176,8 @@ ls wallet-*.json
 ### Can't connect to network
 - Check internet connection
 - Check firewall settings (ports 16316 and 17335)
+  - **IMPORTANT**: Do NOT block port 22 (SSH) - you need it to connect to your server!
+  - Only open ports 16316 (RPC) and 17335 (P2P) if needed
 - Seed nodes are pre-configured, should connect automatically
 
 ### Process stops after SSH disconnect
