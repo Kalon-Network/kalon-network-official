@@ -34,25 +34,28 @@ func NewLevelDBStorage(path string) (*LevelDBStorage, error) {
 		// If database is corrupted, try to recover it
 		log.Printf("⚠️ Failed to open LevelDB: %v", err)
 		log.Printf("🔧 Attempting to recover database...")
-		
+
 		// Check if error is "resource temporarily unavailable" (database locked)
 		if strings.Contains(err.Error(), "resource temporarily unavailable") || strings.Contains(err.Error(), "resource busy") {
-			log.Printf("⚠️ LevelDB is locked by another process")
-			log.Printf("💡 Deleting locked database and starting fresh...")
-			// Delete locked database directory
-			if rmErr := os.RemoveAll(path); rmErr != nil {
-				return nil, fmt.Errorf("failed to remove locked database: %v (original error: %v)", rmErr, err)
+			log.Printf("⚠️ LevelDB is locked (probably from unclean shutdown)")
+			log.Printf("💡 Removing LOCK file and retrying...")
+			// Only remove LOCK file, not the entire database!
+			lockFile := path + "/LOCK"
+			if rmErr := os.Remove(lockFile); rmErr != nil {
+				// If LOCK file doesn't exist, check if it's really locked by another process
+				if !os.IsNotExist(rmErr) {
+					log.Printf("⚠️ Could not remove LOCK file: %v", rmErr)
+					log.Printf("⚠️ Database might be in use by another process")
+					return nil, fmt.Errorf("database is locked and LOCK file could not be removed: %v (original error: %v)", rmErr, err)
+				}
 			}
-			// Recreate directory
-			if err := ensureDir(path); err != nil {
-				return nil, fmt.Errorf("failed to recreate directory: %v", err)
-			}
-			// Try to open again
+			// Try to open again after removing LOCK file
 			db, err = leveldb.OpenFile(path, &opt.Options{})
 			if err != nil {
+				log.Printf("⚠️ Still failed to open after removing LOCK: %v", err)
 				return nil, fmt.Errorf("failed to open database after removing lock: %v", err)
 			}
-			log.Printf("✅ Created fresh database at %s", path)
+			log.Printf("✅ Removed LOCK file and opened database at %s", path)
 		} else {
 			// Try to recover the database
 			_, recoverErr := leveldb.RecoverFile(path, nil)
@@ -235,7 +238,7 @@ func (bs *BlockStorage) StoreBlock(block *core.Block) error {
 	if bestBlock != nil {
 		bestBlockNumber = bestBlock.Header.Number
 	}
-	
+
 	if block.Header.Number > bestBlockNumber {
 		if err := bs.SetBestBlock(block); err != nil {
 			return fmt.Errorf("failed to update best block: %v", err)
