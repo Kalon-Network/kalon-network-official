@@ -153,10 +153,11 @@ print_info "Step 3: Creating directories..."
 mkdir -p data/testnet logs
 print_success "Directories created"
 
-# Step 4: Make binaries executable
-print_info "Step 4: Making binaries executable..."
+# Step 4: Make binaries and scripts executable
+print_info "Step 4: Making binaries and scripts executable..."
 chmod +x build/kalon-miner-v2 build/kalon-wallet 2>/dev/null || true
-print_success "Binaries are ready"
+chmod +x miner-status.sh miner-logs.sh 2>/dev/null || true
+print_success "Binaries and scripts are ready"
 
 echo ""
 print_success "Installation completed successfully!"

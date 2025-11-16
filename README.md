@@ -20,11 +20,12 @@ chmod +x install.sh
 # 4. Create a wallet
 ./build/kalon-wallet create --name mywallet
 
-# 5. Start mining (uses public RPC endpoint - no node needed!)
-./build/kalon-miner-v2 \
+# 5. Start mining (runs in background)
+nohup ./build/kalon-miner-v2 \
   --wallet YOUR_WALLET_ADDRESS \
   --threads 2 \
-  --rpc https://explorer.kalon-network.com/rpc
+  --rpc https://explorer.kalon-network.com/rpc \
+  > logs/miner.log 2>&1 &
 ```
 
 **Important Notes**: 
@@ -82,10 +83,48 @@ This will:
 
 #### Start Miner
 ```bash
-./build/kalon-miner-v2 \
-  --wallet YOUR_ADDRESS \
+nohup ./build/kalon-miner-v2 \
+  --wallet YOUR_WALLET_ADDRESS \
   --threads 2 \
-  --rpc https://explorer.kalon-network.com/rpc
+  --rpc https://explorer.kalon-network.com/rpc \
+  > logs/miner.log 2>&1 &
+```
+
+This will:
+- Start miner in background using nohup
+- Save logs to `logs/miner.log`
+- Continue running after SSH disconnect
+
+#### Check Miner Status
+```bash
+# Make script executable (first time only)
+chmod +x miner-status.sh
+
+# Check status
+./miner-status.sh
+```
+
+Shows:
+- Whether miner is running
+- Process ID, CPU, Memory usage
+- Wallet address and threads
+- Last 20 log lines
+
+#### View Miner Logs
+```bash
+# Make script executable (first time only)
+chmod +x miner-logs.sh
+
+# Show last 20 lines
+./miner-logs.sh
+
+# Follow logs in real-time
+./miner-logs.sh -f
+```
+
+#### Stop Miner
+```bash
+pkill -f kalon-miner-v2
 ```
 
 #### Check Balance
@@ -161,11 +200,10 @@ ls wallet-*.json
 - Check wallet address format
 
 ### Process stops after SSH disconnect
-- Use `nohup` to keep processes running:
-  ```bash
-  nohup ./build/kalon-miner-v2 --wallet YOUR_ADDRESS --threads 2 --rpc https://explorer.kalon-network.com/rpc > miner.log 2>&1 &
-  ```
-- Or use `screen` or `tmux` for interactive sessions
+- Always use `nohup` when starting the miner (see commands above)
+- Miner will continue running in background after SSH disconnect
+- Check status with `./miner-status.sh`
+- View logs with `./miner-logs.sh`
 
 ## 🌐 Public RPC Endpoint
 
@@ -197,11 +235,15 @@ This endpoint allows you to:
   --address YOUR_ADDRESS \
   --rpc https://explorer.kalon-network.com/rpc
 
-# Start mining
-./build/kalon-miner-v2 \
+# Start mining (runs in background)
+nohup ./build/kalon-miner-v2 \
   --wallet YOUR_ADDRESS \
   --threads 2 \
-  --rpc https://explorer.kalon-network.com/rpc
+  --rpc https://explorer.kalon-network.com/rpc \
+  > logs/miner.log 2>&1 &
+
+# Check miner status
+./miner-status.sh
 
 # Send transaction
 ./build/kalon-wallet send \
