@@ -532,39 +532,68 @@ func (rpc *RPCBlockchainV2) CreateNewBlock(miner core.Address, txs []core.Transa
 		}
 	}
 
-	// Calculate merkle root from transactions
-	// Note: We need to create a ConsensusManager to calculate merkle root
-	// For now, we'll calculate it directly using the same logic
-	var merkleRoot core.Hash
-	if len(blockTxs) == 0 {
-		merkleRoot = core.Hash{}
-	} else if len(blockTxs) == 1 {
-		merkleRoot = blockTxs[0].CalculateHash()
-	} else {
-		// Build merkle tree
-		hashes := make([][]byte, len(blockTxs))
-		for i, tx := range blockTxs {
-			hashes[i] = tx.CalculateHash().Bytes()
-		}
-
-		for len(hashes) > 1 {
-			var nextLevel [][]byte
-			for i := 0; i < len(hashes); i += 2 {
-				var left, right []byte
-				left = hashes[i]
-				if i+1 < len(hashes) {
-					right = hashes[i+1]
-				} else {
-					right = hashes[i] // Duplicate last element if odd number
-				}
-				// Concatenate and hash
-				combined := append(left, right...)
-				hash := sha256.Sum256(combined)
-				nextLevel = append(nextLevel, hash[:])
+	// Helper function to calculate merkle root
+	calculateMerkleRoot := func(txs []core.Transaction) core.Hash {
+		if len(txs) == 0 {
+			return core.Hash{}
+		} else if len(txs) == 1 {
+			// CRITICAL: Use hash if already set, otherwise calculate
+			if txs[0].Hash != (core.Hash{}) {
+				return txs[0].Hash
 			}
-			hashes = nextLevel
+			return txs[0].CalculateHash()
+		} else {
+			// Build merkle tree
+			hashes := make([][]byte, len(txs))
+			for i, tx := range txs {
+				// CRITICAL: Use hash if already set (from RPC), otherwise calculate
+				if tx.Hash != (core.Hash{}) {
+					hashes[i] = tx.Hash.Bytes()
+				} else {
+					hashes[i] = tx.CalculateHash().Bytes()
+				}
+			}
+
+			for len(hashes) > 1 {
+				var nextLevel [][]byte
+				for i := 0; i < len(hashes); i += 2 {
+					var left, right []byte
+					left = hashes[i]
+					if i+1 < len(hashes) {
+						right = hashes[i+1]
+					} else {
+						right = hashes[i] // Duplicate last element if odd number
+					}
+					// Concatenate and hash
+					combined := append(left, right...)
+					hash := sha256.Sum256(combined)
+					nextLevel = append(nextLevel, hash[:])
+				}
+				hashes = nextLevel
+			}
+			var result core.Hash
+			copy(result[:], hashes[0])
+			return result
 		}
-		copy(merkleRoot[:], hashes[0])
+	}
+
+	// CRITICAL: Use merkle root from RPC server if provided, otherwise calculate
+	// This ensures consistency with the node's merkle root calculation
+	var merkleRoot core.Hash
+	if merkleRootStr, ok := result["merkleRoot"].(string); ok {
+		merkleRootBytes, err := hex.DecodeString(merkleRootStr)
+		if err == nil && len(merkleRootBytes) == 32 {
+			copy(merkleRoot[:], merkleRootBytes)
+			core.LogDebug("Using merkle root from RPC server: %x", merkleRoot)
+		} else {
+			// Fallback: calculate merkle root
+			core.LogDebug("Failed to parse merkle root from RPC, calculating...")
+			merkleRoot = calculateMerkleRoot(blockTxs)
+		}
+	} else {
+		// Fallback: calculate merkle root
+		core.LogDebug("No merkle root in RPC response, calculating...")
+		merkleRoot = calculateMerkleRoot(blockTxs)
 	}
 
 	// Create block with transactions from RPC server

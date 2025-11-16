@@ -59,6 +59,19 @@ func (us *UTXOSet) SpendUTXO(txHash Hash, index uint32) bool {
 	return false
 }
 
+// RestoreUTXO restores a UTXO that was previously spent (for chain reorganization)
+func (us *UTXOSet) RestoreUTXO(txHash Hash, index uint32) bool {
+	us.mu.Lock()
+	defer us.mu.Unlock()
+
+	key := us.getKey(txHash, index)
+	if utxo, exists := us.utxos[key]; exists && utxo.Spent {
+		utxo.Spent = false
+		return true
+	}
+	return false
+}
+
 // GetUTXOs returns all UTXOs for a given address
 func (us *UTXOSet) GetUTXOs(address Address) []*UTXO {
 	us.mu.RLock()
@@ -96,11 +109,16 @@ func (us *UTXOSet) RemoveUTXOs(blockHash Hash) {
 	}
 }
 
-// getKey creates a unique key for a UTXO
-func (us *UTXOSet) getKey(txHash Hash, index uint32) string {
+// GetKey creates a unique key for a UTXO (exported for use in blockchain.go)
+func (us *UTXOSet) GetKey(txHash Hash, index uint32) string {
 	indexBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(indexBytes, index)
 	return string(txHash[:]) + ":" + string(indexBytes)
+}
+
+// getKey creates a unique key for a UTXO (internal use)
+func (us *UTXOSet) getKey(txHash Hash, index uint32) string {
+	return us.GetKey(txHash, index)
 }
 
 // CalculateTransactionHash calculates the hash of a transaction

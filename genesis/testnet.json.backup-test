@@ -2,18 +2,15 @@
   "chainId": 7718,
   "name": "Kalon Testnet",
   "symbol": "tKALON",
-  "blockTimeTargetSeconds": 15,
+  "blockTimeTargetSeconds": 30,
   "maxSupply": 1000000000,
   "initialBlockReward": 5.0,
   "halvingSchedule": [],
   "difficulty": {
     "algo": "LWMA",
     "window": 120,
-    "initialDifficulty": 25,
+    "initialDifficulty": 15,
     "maxAdjustPerBlockPct": 25,
-    "maxDifficulty": 50,
-    "minDifficulty": 20,
-    "maxMiningThreads": 2,
     "launchGuard": {
       "enabled": false,
       "durationHours": 24,
@@ -23,7 +20,7 @@
   },
   "addressFormat": { "type": "bech32", "hrp": "tkalon" },
   "premine": { "enabled": false },
-  "treasuryAddress": "kalon1df7552b7f9f25986fd33511e68d5ba5e37fd12d3",
+  "treasuryAddress": "tkalon1treasury0000000000000000000000000000000000000000000000000000000000",
   "networkFee": {
     "blockFeeRate": 0.05,
     "txFeeShareTreasury": 0.20,
@@ -35,16 +32,6 @@
       "networkFeeRate": 0.05,
       "txFeeShareTreasury": 0.20,
       "treasuryCapPercent": 10
-    }
-  },
-  "seedNodes": [],
-  "snapshot": {
-    "enabled": true,
-    "height": 1,
-    "balances": {
-      "df7552b7f9f25986fd33511e68d5ba5e37fd12d3": 1000000000,
-      "a1b2c3d4e5f6789012345678901234567890abcd": 500000000,
-      "fedcba0987654321098765432109876543210fedc": 250000000
     }
   }
 }

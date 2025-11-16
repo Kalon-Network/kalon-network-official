@@ -1,0 +1,41 @@
+{
+  "chainId": 7719,
+  "name": "Kalon Network",
+  "symbol": "KALON",
+  "blockTimeTargetSeconds": 30,
+  "maxSupply": 1000000000,
+  "initialBlockReward": 5.0,
+  "halvingSchedule": [
+    { "afterBlocks": 259200, "rewardMultiplier": 0.5 },
+    { "afterBlocks": 777600, "rewardMultiplier": 0.25 },
+    { "afterBlocks": 1814400, "rewardMultiplier": 0.125 }
+  ],
+  "difficulty": {
+    "algo": "LWMA",
+    "window": 120,
+    "initialDifficulty": 1,
+    "maxAdjustPerBlockPct": 25,
+    "launchGuard": {
+      "enabled": true,
+      "durationHours": 48,
+      "difficultyFloorMultiplier": 8.0,
+      "initialReward": 1.0
+    }
+  },
+  "addressFormat": { "type": "bech32", "hrp": "kalon" },
+  "premine": { "enabled": false },
+  "treasuryAddress": "kalon1treasury0000000000000000000000000000000000000000000000000000000000",
+  "networkFee": {
+    "blockFeeRate": 0.05,
+    "txFeeShareTreasury": 0.20,
+    "baseTxFee": 0.01,
+    "gasPrice": 1000
+  },
+  "governance": {
+    "parameters": {
+      "networkFeeRate": 0.05,
+      "txFeeShareTreasury": 0.20,
+      "treasuryCapPercent": 10
+    }
+  }
+}

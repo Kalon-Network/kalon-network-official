@@ -613,9 +613,27 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 
 	// Validate difficulty
 	consensusManager := NewConsensusManager(bc.genesis)
-	// For validation, we don't have full block history, so pass empty slice
-	// The difficulty is already set in the block, we just validate it matches expected
-	expectedDifficulty := consensusManager.CalculateDifficulty(block.Header.Number, parent, []time.Time{})
+	// CRITICAL: Use block history for accurate difficulty validation (LWMA requires history)
+	// Get block history for LWMA difficulty adjustment (uses separate lock, no main lock needed)
+	windowSize := int(bc.genesis.Difficulty.Window)
+	if windowSize == 0 {
+		windowSize = 120 // Default window size
+	}
+	blockHistory := bc.blockHistory.GetWindow(windowSize)
+	expectedDifficulty := consensusManager.CalculateDifficulty(block.Header.Number, parent, blockHistory)
+
+	// Allow difficulty to be within MinDifficulty/MaxDifficulty range (due to caps)
+	minDiff := bc.genesis.Difficulty.MinDifficulty
+	maxDiff := bc.genesis.Difficulty.MaxDifficulty
+	if minDiff > 0 && maxDiff > 0 {
+		// If difficulty is capped/floored, allow the capped/floored value
+		if expectedDifficulty > maxDiff {
+			expectedDifficulty = maxDiff
+		} else if expectedDifficulty < minDiff {
+			expectedDifficulty = minDiff
+		}
+	}
+
 	if block.Header.Difficulty != expectedDifficulty {
 		return fmt.Errorf("invalid difficulty: expected %d, got %d", expectedDifficulty, block.Header.Difficulty)
 	}
@@ -809,12 +827,46 @@ func (bc *BlockchainV2) reorganizeChain(newBestBlock *Block) error {
 		block := blocksToRemove[i]
 		LogDebug("   Rolling back Block #%d (%x)", block.Header.Number, block.Hash)
 
-		// Remove UTXOs created by this block
-		bc.utxoSet.RemoveUTXOs(block.Hash)
+		// For each transaction in the removed block, rollback its UTXO changes
+		for _, tx := range block.Txs {
+			// Remove UTXOs created by this transaction (outputs)
+			// The UTXO will be removed by RemoveUTXOs(block.Hash) below
 
-		// Re-add UTXOs that were spent by this block (rollback spending)
-		// Note: UTXO rollback is simplified - in a full implementation, we'd need to track
-		// which UTXOs were spent and restore them. For now, we only remove UTXOs created by this block.
+			// Restore UTXOs that were spent by this transaction (inputs)
+			for _, input := range tx.Inputs {
+				// Find the original transaction that created this UTXO
+				// We need to search through previous blocks to find the transaction
+				originalTx := bc.findTransactionByHash(input.PreviousTxHash)
+				if originalTx != nil {
+					// Find the output in the original transaction
+					if int(input.Index) < len(originalTx.Outputs) {
+						output := originalTx.Outputs[input.Index]
+						// Find the block that contained the original transaction
+						originalBlockHash := bc.findBlockHashForTransaction(input.PreviousTxHash)
+						if originalBlockHash != (Hash{}) {
+							// Restore the UTXO
+							bc.utxoSet.RestoreUTXO(input.PreviousTxHash, input.Index)
+							// If the UTXO doesn't exist (was deleted), recreate it
+							utxos := bc.utxoSet.GetUTXOs(output.Address)
+							found := false
+							for _, utxo := range utxos {
+								if utxo.TxHash == input.PreviousTxHash && utxo.Index == input.Index {
+									found = true
+									break
+								}
+							}
+							if !found {
+								bc.utxoSet.AddUTXO(input.PreviousTxHash, input.Index, output.Amount, output.Address, originalBlockHash)
+								LogDebug("   Restored UTXO: TxHash=%x, Index=%d, Amount=%d", input.PreviousTxHash, input.Index, output.Amount)
+							}
+						}
+					}
+				}
+			}
+		}
+
+		// Remove UTXOs created by this block (all outputs from all transactions)
+		bc.utxoSet.RemoveUTXOs(block.Hash)
 	}
 
 	// Step 2: Remove blocks from blocks array and update height
@@ -1022,6 +1074,72 @@ func (bc *BlockchainV2) GetAddressTransactions(address Address) []*Transaction {
 	return transactions
 }
 
+// findTransactionByHash finds a transaction by its hash in the blockchain
+// NOTE: This function should NOT acquire locks if called from within reorganizeChain
+// It assumes the caller already holds the lock or doesn't need it
+func (bc *BlockchainV2) findTransactionByHash(txHash Hash) *Transaction {
+	// Search through all blocks (assuming lock is already held or not needed)
+	for _, block := range bc.blocks {
+		for i := range block.Txs {
+			if block.Txs[i].Hash == txHash {
+				return &block.Txs[i]
+			}
+		}
+	}
+
+	// Try storage if not found in memory (release lock temporarily for I/O)
+	if bc.storage != nil {
+		// Search through stored blocks (this is expensive, but necessary for reorganization)
+		currentHeight := bc.height
+		for height := uint64(0); height <= currentHeight; height++ {
+			block, err := bc.storage.GetBlockByNumber(height)
+			if err != nil || block == nil {
+				continue
+			}
+			for i := range block.Txs {
+				if block.Txs[i].Hash == txHash {
+					return &block.Txs[i]
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// findBlockHashForTransaction finds the block hash that contains a transaction
+// NOTE: This function should NOT acquire locks if called from within reorganizeChain
+// It assumes the caller already holds the lock or doesn't need it
+func (bc *BlockchainV2) findBlockHashForTransaction(txHash Hash) Hash {
+	// Search through all blocks (assuming lock is already held or not needed)
+	for _, block := range bc.blocks {
+		for _, tx := range block.Txs {
+			if tx.Hash == txHash {
+				return block.Hash
+			}
+		}
+	}
+
+	// Try storage if not found in memory (release lock temporarily for I/O)
+	if bc.storage != nil {
+		// Search through stored blocks
+		currentHeight := bc.height
+		for height := uint64(0); height <= currentHeight; height++ {
+			block, err := bc.storage.GetBlockByNumber(height)
+			if err != nil || block == nil {
+				continue
+			}
+			for _, tx := range block.Txs {
+				if tx.Hash == txHash {
+					return block.Hash
+				}
+			}
+		}
+	}
+
+	return Hash{}
+}
+
 // GetHeight returns the current height thread-safely
 func (bc *BlockchainV2) GetHeight() uint64 {
 	bc.mu.RLock()
@@ -1201,7 +1319,15 @@ func (bc *BlockchainV2) createBlockRewardTransactionPtr(recipient Address, amoun
 
 // createBlockRewardTransaction creates a block reward transaction
 func (bc *BlockchainV2) createBlockRewardTransaction(miner Address, amount uint64) Transaction {
-	LogDebug("createBlockRewardTransaction - Miner address: %x, Amount: %d", miner, amount)
+	bc.mu.RLock()
+	nextHeight := bc.height + 1
+	bc.mu.RUnlock()
+
+	LogDebug("createBlockRewardTransaction - Miner address: %x, Amount: %d, Height: %d", miner, amount, nextHeight)
+
+	// CRITICAL: Make block reward transaction unique by including block height and nanosecond timestamp
+	// This ensures each block reward has a unique hash, preventing UTXO overwrites
+	data := fmt.Sprintf("block_reward:%d:%d", nextHeight, time.Now().UnixNano())
 
 	// Create a special coinbase transaction (no inputs, only output)
 	tx := Transaction{
@@ -1212,9 +1338,9 @@ func (bc *BlockchainV2) createBlockRewardTransaction(miner Address, amount uint6
 		Fee:       0,
 		GasUsed:   0,
 		GasPrice:  0,
-		Data:      []byte("block_reward"),
-		Signature: []byte{},    // No signature needed for coinbase
-		Inputs:    []TxInput{}, // No inputs for coinbase
+		Data:      []byte(data), // Unique data with block height and timestamp
+		Signature: []byte{},     // No signature needed for coinbase
+		Inputs:    []TxInput{},  // No inputs for coinbase
 		Outputs: []TxOutput{
 			{
 				Address: miner,
@@ -1224,7 +1350,7 @@ func (bc *BlockchainV2) createBlockRewardTransaction(miner Address, amount uint6
 		Timestamp: time.Now(),
 	}
 
-	LogDebug("createBlockRewardTransaction - Created TX with output address: %x", tx.Outputs[0].Address)
+	LogDebug("createBlockRewardTransaction - Created TX with output address: %x, Data: %s", tx.Outputs[0].Address, data)
 
 	// CRITICAL: Use tx.CalculateHash() for consistency with CalculateMerkleRoot
 	// This ensures the hash matches when validating the merkle root
