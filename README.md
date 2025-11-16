@@ -6,6 +6,8 @@ Welcome to Kalon Network! This is the official community release - a clean, simp
 
 **Community Members**: You don't need to run your own node! Simply use the public RPC endpoint.
 
+### Step 1-3: Installation
+
 ```bash
 # 1. Clone repository
 git clone https://github.com/Kalon-Network/kalon-network-official.git
@@ -16,17 +18,27 @@ chmod +x install.sh
 
 # 3. Run installation
 ./install.sh
+```
 
-# 4. Create a wallet
+### Step 4: Create Wallet
+
+```bash
 ./build/kalon-wallet create --name mywallet
+```
 
-# 5. Start mining (runs in background)
+**Important**: Save your wallet address and mnemonic phrase! You'll need the wallet address for mining.
+
+### Step 5: Start Mining
+
+```bash
 nohup ./build/kalon-miner-v2 \
   --wallet YOUR_WALLET_ADDRESS \
   --threads 2 \
   --rpc https://explorer.kalon-network.com/rpc \
   > logs/miner.log 2>&1 &
 ```
+
+**Replace `YOUR_WALLET_ADDRESS` with your actual wallet address from Step 4!**
 
 **Important Notes**: 
 - Community members **do NOT need their own node** - use the public RPC endpoint: `https://explorer.kalon-network.com/rpc`
