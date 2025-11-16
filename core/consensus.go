@@ -197,6 +197,19 @@ func (cm *ConsensusManager) CalculateDifficulty(height uint64, parent *Block, bl
 		return parent.Header.Difficulty
 	}
 
+	// Difficulty-Timeout: Reset to initial difficulty if no blocks found for 10 minutes
+	// This prevents the difficulty from getting stuck too high when all miners are stopped
+	if len(blockHistory) > 0 {
+		lastBlockTime := blockHistory[len(blockHistory)-1]
+		timeSinceLastBlock := time.Since(lastBlockTime)
+		
+		// Reset to initial difficulty after 10 minutes of no blocks
+		if timeSinceLastBlock > 10*time.Minute {
+			log.Printf("Difficulty-Timeout: No blocks for %v, resetting difficulty to initial (%d)", timeSinceLastBlock, cm.genesis.Difficulty.InitialDifficulty)
+			return cm.genesis.Difficulty.InitialDifficulty
+		}
+	}
+
 	// Calculate LWMA (Linear Weighted Moving Average)
 	// Weight more recent blocks more heavily
 	targetBlockTime := time.Duration(cm.genesis.BlockTimeTarget) * time.Second
