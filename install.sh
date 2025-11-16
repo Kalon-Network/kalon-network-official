@@ -128,16 +128,6 @@ cd "$SCRIPT_DIR"
 # Create build directory
 mkdir -p build
 
-# Build node
-print_info "Building kalon-node-v2..."
-go build -o build/kalon-node-v2 cmd/kalon-node-v2/main.go
-if [ $? -eq 0 ]; then
-    print_success "kalon-node-v2 built successfully"
-else
-    print_error "Failed to build kalon-node-v2"
-    exit 1
-fi
-
 # Build miner
 print_info "Building kalon-miner-v2..."
 go build -o build/kalon-miner-v2 cmd/kalon-miner-v2/main.go
@@ -163,10 +153,10 @@ print_info "Step 3: Creating directories..."
 mkdir -p data/testnet logs
 print_success "Directories created"
 
-# Step 4: Make scripts executable
-print_info "Step 4: Making scripts executable..."
-chmod +x start.sh stop.sh status.sh logs.sh 2>/dev/null || true
-print_success "Scripts are ready"
+# Step 4: Make binaries executable
+print_info "Step 4: Making binaries executable..."
+chmod +x build/kalon-miner-v2 build/kalon-wallet 2>/dev/null || true
+print_success "Binaries are ready"
 
 echo ""
 print_success "Installation completed successfully!"
@@ -175,20 +165,21 @@ echo "════════════════════════�
 echo "Next Steps:"
 echo "════════════════════════════════════════════════════════════"
 echo ""
-echo "1. Run the setup wizard:"
-echo "   ./setup.sh"
+echo "1. Create a wallet:"
+echo "   ./build/kalon-wallet create --name mywallet"
 echo ""
-echo "   This will guide you through:"
-echo "   - Starting your node"
-echo "   - Creating a wallet"
-echo "   - Starting the miner"
+echo "2. Start mining (uses public RPC endpoint):"
+echo "   ./build/kalon-miner-v2 \\"
+echo "     --wallet YOUR_WALLET_ADDRESS \\"
+echo "     --threads 2 \\"
+echo "     --rpc https://explorer.kalon-network.com/rpc"
 echo ""
-echo "2. Or use the management scripts:"
-echo "   ./start.sh   - Start node and miner"
-echo "   ./stop.sh    - Stop node and miner"
-echo "   ./status.sh  - Check status"
-echo "   ./logs.sh    - View logs"
+echo "3. Check balance:"
+echo "   ./build/kalon-wallet balance \\"
+echo "     --address YOUR_WALLET_ADDRESS \\"
+echo "     --rpc https://explorer.kalon-network.com/rpc"
 echo ""
+echo "Note: No local node needed! Use the public RPC endpoint."
 echo "════════════════════════════════════════════════════════════"
 echo ""
 

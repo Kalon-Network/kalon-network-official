@@ -11,13 +11,16 @@ Welcome to Kalon Network! This is the official community release - a clean, simp
 git clone https://github.com/Kalon-Network/kalon-network-official.git
 cd kalon-network-official
 
-# 2. Run installation
+# 2. Make install script executable (if needed)
+chmod +x install.sh
+
+# 3. Run installation
 ./install.sh
 
-# 3. Create a wallet
+# 4. Create a wallet
 ./build/kalon-wallet create --name mywallet
 
-# 4. Start mining (uses public RPC endpoint - no node needed!)
+# 5. Start mining (uses public RPC endpoint - no node needed!)
 ./build/kalon-miner-v2 \
   --wallet YOUR_WALLET_ADDRESS \
   --threads 2 \
@@ -55,6 +58,10 @@ The installation script will automatically install Go if needed.
 Run the installation script:
 
 ```bash
+# Make script executable (if needed)
+chmod +x install.sh
+
+# Run installation
 ./install.sh
 ```
 
@@ -63,6 +70,8 @@ This will:
 - Build all binaries (miner, wallet)
 - Create necessary directories
 - Set up everything for you
+
+**Note**: The installation script only builds miner and wallet binaries. No node is built as it's not needed for community members.
 
 ### Manual Commands
 
