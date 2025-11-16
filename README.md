@@ -74,11 +74,8 @@ Run the installation script:
 # Make script executable (if needed)
 chmod +x install.sh
 
-# Run installation (as normal user - recommended)
+# Run installation
 ./install.sh
-
-# Or if you need to run as root (not recommended)
-./install.sh --allow-root
 ```
 
 This will:
@@ -87,9 +84,7 @@ This will:
 - Create necessary directories
 - Set up everything for you
 
-**Note**: 
-- The installation script only builds miner and wallet binaries. No node is built as it's not needed for community members.
-- **Running as root**: The script will warn you if run as root. Use `--allow-root` flag if you really need to run as root (e.g., for Go installation in /usr/local).
+**Note**: The installation script only builds miner and wallet binaries. No node is built as it's not needed for community members.
 
 ### Manual Commands
 

@@ -39,26 +39,6 @@ print_error() {
     echo -e "${RED}❌${NC} $1"
 }
 
-# Check for --allow-root flag
-ALLOW_ROOT=false
-for arg in "$@"; do
-    if [ "$arg" = "--allow-root" ]; then
-        ALLOW_ROOT=true
-        break
-    fi
-done
-
-# Check if running as root
-if [ "$EUID" -eq 0 ]; then 
-    if [ "$ALLOW_ROOT" = false ]; then
-        print_warning "Please do not run this script as root"
-        print_info "If you really need to run as root, use: ./install.sh --allow-root"
-        exit 1
-    else
-        print_warning "Running as root (--allow-root flag provided)"
-        print_warning "Be careful - this script will modify system files!"
-    fi
-fi
 
 # Step 1: Check/Install Go
 print_info "Step 1: Checking Go installation..."
