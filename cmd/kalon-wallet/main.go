@@ -911,8 +911,20 @@ func sendTransaction(rpcURL string, txReq *TransactionRequest, wallet *crypto.Wa
 	if gasUsed, ok := txData["gasUsed"].(float64); ok {
 		tx.GasUsed = uint64(gasUsed)
 	}
+	// Set default gas usage if 0 or not provided
+	if tx.GasUsed == 0 {
+		tx.GasUsed = 1
+	}
 	if gasPrice, ok := txData["gasPrice"].(float64); ok {
 		tx.GasPrice = uint64(gasPrice)
+	}
+	// Set default gas price if 0 or not provided (should match fee for simplicity)
+	if tx.GasPrice == 0 {
+		if tx.Fee > 0 {
+			tx.GasPrice = tx.Fee
+		} else {
+			tx.GasPrice = 100000 // Default gas price
+		}
 	}
 
 	// Parse data
@@ -922,16 +934,7 @@ func sendTransaction(rpcURL string, txReq *TransactionRequest, wallet *crypto.Wa
 		}
 	}
 
-	// Parse hash
-	if hashStr, ok := txData["hash"].(string); ok {
-		if hashBytes, err := hex.DecodeString(hashStr); err == nil && len(hashBytes) == 32 {
-			copy(tx.Hash[:], hashBytes)
-		}
-	} else {
-		tx.Hash = tx.CalculateHash()
-	}
-
-	// Parse inputs and outputs
+	// Parse inputs and outputs FIRST (before hash calculation)
 	if inputsData, ok := txData["inputs"].([]interface{}); ok {
 		for _, inputData := range inputsData {
 			if inputMap, ok := inputData.(map[string]interface{}); ok {
@@ -971,12 +974,44 @@ func sendTransaction(rpcURL string, txReq *TransactionRequest, wallet *crypto.Wa
 		tx.Timestamp = time.Now()
 	}
 
-	// Sign transaction
+	// Parse hash from prepareTransaction response (if provided)
+	// This hash was calculated by the server and should be used as-is
+	if hashStr, ok := txData["hash"].(string); ok {
+		if hashBytes, err := hex.DecodeString(hashStr); err == nil && len(hashBytes) == 32 {
+			copy(tx.Hash[:], hashBytes)
+		} else {
+			// If hash is invalid, calculate it
+			tx.Hash = tx.CalculateHash()
+		}
+	} else {
+		// If no hash provided, calculate it
+		tx.Hash = tx.CalculateHash()
+	}
+
+	// Sign transaction (signature is over the transaction data, including hash)
 	if err := wallet.SignTransaction(tx); err != nil {
 		return nil, fmt.Errorf("failed to sign transaction: %v", err)
 	}
 
 	// Step 2: Send signed transaction
+	// Serialize inputs
+	inputs := make([]interface{}, 0, len(tx.Inputs))
+	for _, input := range tx.Inputs {
+		inputs = append(inputs, map[string]interface{}{
+			"previousTxHash": hex.EncodeToString(input.PreviousTxHash[:]),
+			"index":          input.Index,
+		})
+	}
+
+	// Serialize outputs
+	outputs := make([]interface{}, 0, len(tx.Outputs))
+	for _, output := range tx.Outputs {
+		outputs = append(outputs, map[string]interface{}{
+			"address": hex.EncodeToString(output.Address[:]),
+			"amount":  output.Amount,
+		})
+	}
+
 	signedTxReq := RPCRequest{
 		JSONRPC: "2.0",
 		Method:  "sendTransaction",
@@ -993,6 +1028,8 @@ func sendTransaction(rpcURL string, txReq *TransactionRequest, wallet *crypto.Wa
 				"signature": hex.EncodeToString(tx.Signature),
 				"publicKey": hex.EncodeToString(tx.PublicKey),
 				"hash":      hex.EncodeToString(tx.Hash[:]),
+				"inputs":    inputs,
+				"outputs":   outputs,
 			},
 		},
 		ID: 2,
