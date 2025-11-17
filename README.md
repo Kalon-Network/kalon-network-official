@@ -172,6 +172,10 @@ This will create a wallet file `wallet-mywallet.json` and display your wallet ad
 
 ### List Wallets
 ```bash
+# Option 1: Using wallet tool (shows address and public key)
+./build/kalon-wallet list
+
+# Option 2: Simple file listing
 ls wallet-*.json
 ```
 
@@ -200,7 +204,7 @@ ls wallet-*.json
 ## 🛠️ Troubleshooting
 
 ### Miner not starting
-- Check wallet exists: `ls wallet-*.json`
+- Check wallet exists: `./build/kalon-wallet list` or `ls wallet-*.json`
 - Verify wallet address is correct
 - Check internet connection (needed for RPC endpoint)
 - Ensure RPC endpoint is accessible: `curl https://explorer.kalon-network.com/rpc`
