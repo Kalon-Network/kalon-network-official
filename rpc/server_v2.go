@@ -761,11 +761,23 @@ func (s *ServerV2) handleCreateBlockTemplateV2(req *RPCRequest) *RPCResponse {
 			"fee":       tx.Fee,
 			"nonce":     tx.Nonce,
 			"timestamp": tx.Timestamp.Unix(),
+			"gasUsed":   tx.GasUsed,
+			"gasPrice":  tx.GasPrice,
 		}
 
 		// Serialize data field (hex-encoded)
 		if len(tx.Data) > 0 {
 			txMap["data"] = hex.EncodeToString(tx.Data)
+		}
+
+		// Serialize signature (hex-encoded) - required for user transactions
+		if len(tx.Signature) > 0 {
+			txMap["signature"] = hex.EncodeToString(tx.Signature)
+		}
+
+		// Serialize public key (hex-encoded) - required for user transactions
+		if len(tx.PublicKey) > 0 {
+			txMap["publicKey"] = hex.EncodeToString(tx.PublicKey)
 		}
 
 		// Serialize outputs
