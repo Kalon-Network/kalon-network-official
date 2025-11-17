@@ -187,19 +187,34 @@ ls wallet-*.json
 ```
 
 ### Send Transaction
+
+**Interactive mode (recommended):**
+```bash
+./build/kalon-wallet send
+```
+
+This will prompt you for:
+- Sender wallet (select from available wallets)
+- Recipient address (or wallet filename)
+- Amount (in micro-KALON)
+- Fee (default: 100000 micro-KALON)
+
+**Command line mode:**
 ```bash
 ./build/kalon-wallet send \
+  --from wallet-mywallet.json \
   --to kalon1def... \
   --amount 1000000 \
-  --fee 100000 \
-  --input wallet-mywallet.json \
-  --rpc https://explorer.kalon-network.com/rpc
+  --fee 100000
 ```
 
 **Note**: 
+- RPC URL defaults to `https://explorer.kalon-network.com/rpc` (no need to specify)
 - Amounts are in micro-KALON (1 tKALON = 1,000,000 micro-KALON)
 - For example: 1.5 tKALON = 1500000 micro-KALON
 - Minimum fee: 10000 micro-KALON (0.01 tKALON)
+- You can use wallet filenames for `--to` (e.g., `wallet-recipient.json`)
+- Transactions are automatically signed before sending
 
 ## 🛠️ Troubleshooting
 
@@ -261,13 +276,15 @@ nohup ./build/kalon-miner-v2 \
 # Check miner status
 ./miner-status.sh
 
-# Send transaction
+# Send transaction (interactive mode)
+./build/kalon-wallet send
+
+# Or with parameters:
 ./build/kalon-wallet send \
+  --from wallet-mywallet.json \
   --to RECIPIENT_ADDRESS \
   --amount 1000000 \
-  --fee 100000 \
-  --input wallet-mywallet.json \
-  --rpc https://explorer.kalon-network.com/rpc
+  --fee 100000
 ```
 
 ## 📚 More Information
