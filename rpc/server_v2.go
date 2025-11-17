@@ -982,11 +982,23 @@ func (s *ServerV2) parseBlockData(data map[string]interface{}) (*core.Block, err
 				if gasPrice, ok := txMap["gasPrice"].(float64); ok {
 					tx.GasPrice = uint64(gasPrice)
 				}
-				if data, ok := txMap["data"].([]byte); ok {
-					tx.Data = data
+				// Parse data (hex-encoded string)
+				if dataStr, ok := txMap["data"].(string); ok {
+					if dataBytes, err := hex.DecodeString(dataStr); err == nil {
+						tx.Data = dataBytes
+					}
 				}
-				if signature, ok := txMap["signature"].([]byte); ok {
-					tx.Signature = signature
+				// Parse signature (hex-encoded string)
+				if sigStr, ok := txMap["signature"].(string); ok {
+					if sigBytes, err := hex.DecodeString(sigStr); err == nil {
+						tx.Signature = sigBytes
+					}
+				}
+				// Parse public key (hex-encoded string)
+				if pubKeyStr, ok := txMap["publicKey"].(string); ok {
+					if pubKeyBytes, err := hex.DecodeString(pubKeyStr); err == nil {
+						tx.PublicKey = pubKeyBytes
+					}
 				}
 				// Parse UTXO fields
 				if inputs, ok := txMap["inputs"].([]interface{}); ok {
