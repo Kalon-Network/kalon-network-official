@@ -470,8 +470,20 @@ func (rpc *RPCBlockchainV2) CreateNewBlock(miner core.Address, txs []core.Transa
 				} else if data, ok := txMap["data"].([]byte); ok {
 					tx.Data = data
 				}
-				if signature, ok := txMap["signature"].([]byte); ok {
+				// Parse signature (hex-encoded string from server)
+				if sigStr, ok := txMap["signature"].(string); ok {
+					if sigBytes, err := hex.DecodeString(sigStr); err == nil {
+						tx.Signature = sigBytes
+					}
+				} else if signature, ok := txMap["signature"].([]byte); ok {
+					// Fallback: if sent as []byte
 					tx.Signature = signature
+				}
+				// Parse public key (hex-encoded string from server)
+				if pubKeyStr, ok := txMap["publicKey"].(string); ok {
+					if pubKeyBytes, err := hex.DecodeString(pubKeyStr); err == nil {
+						tx.PublicKey = pubKeyBytes
+					}
 				}
 				if hashStr, ok := txMap["hash"].(string); ok {
 					if hashBytes, err := hex.DecodeString(hashStr); err == nil {
@@ -637,6 +649,20 @@ func (rpc *RPCBlockchainV2) AddBlock(block *core.Block) error {
 			})
 		}
 
+		// Serialize signature and public key as hex-encoded strings (not []byte)
+		signatureStr := ""
+		if len(tx.Signature) > 0 {
+			signatureStr = hex.EncodeToString(tx.Signature)
+		}
+		publicKeyStr := ""
+		if len(tx.PublicKey) > 0 {
+			publicKeyStr = hex.EncodeToString(tx.PublicKey)
+		}
+		dataStr := ""
+		if len(tx.Data) > 0 {
+			dataStr = hex.EncodeToString(tx.Data)
+		}
+
 		txMap := map[string]interface{}{
 			"from":      tx.From.String(),
 			"to":        tx.To.String(),
@@ -645,8 +671,9 @@ func (rpc *RPCBlockchainV2) AddBlock(block *core.Block) error {
 			"fee":       float64(tx.Fee),
 			"gasUsed":   float64(tx.GasUsed),
 			"gasPrice":  float64(tx.GasPrice),
-			"data":      tx.Data,
-			"signature": tx.Signature,
+			"data":      dataStr,
+			"signature": signatureStr,
+			"publicKey": publicKeyStr,
 			"hash":      hex.EncodeToString(tx.Hash[:]),
 			"inputs":    tx.Inputs,
 			"outputs":   outputs, // CRITICAL: Use manually constructed outputs
