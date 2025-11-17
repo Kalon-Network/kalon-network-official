@@ -46,6 +46,26 @@ nohup ./build/kalon-miner-v2 \
 - For wallet operations and mining, the public RPC endpoint is sufficient
 - **In Mainnet**: You can operate a seed node and participate in network rewards - more information will be available when Mainnet launches
 
+## 🔄 Updates
+
+To update your installation to the latest version:
+
+```bash
+# Navigate to the repository directory
+cd kalon-network-official
+
+# Pull latest changes (uses 'main' branch, not 'master')
+git pull origin main
+
+# Or simply:
+git pull
+
+# Rebuild binaries
+./install.sh
+```
+
+**Note**: This repository uses the `main` branch, not `master`. Use `git pull origin main` or just `git pull`.
+
 ## ✨ Features
 
 - **Easy Installation**: One script installs everything
