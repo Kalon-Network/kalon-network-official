@@ -352,6 +352,8 @@ func (s *ServerV2) handleRPCMethod(req *RPCRequest) *RPCResponse {
 		return s.handleGetMiningInfo(req)
 	case "getBalance":
 		return s.handleGetBalance(req)
+	case "prepareTransaction":
+		return s.handlePrepareTransaction(req)
 	case "sendTransaction":
 		return s.handleSendTransaction(req)
 	case "createSnapshot":
@@ -1213,6 +1215,91 @@ func (s *ServerV2) handleGetBalance(req *RPCRequest) *RPCResponse {
 	}
 }
 
+// handlePrepareTransaction prepares a transaction structure for signing (returns unsigned transaction)
+func (s *ServerV2) handlePrepareTransaction(req *RPCRequest) *RPCResponse {
+	params, ok := req.Params.(map[string]interface{})
+	if !ok {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+			},
+			ID: req.ID,
+		}
+	}
+
+	fromStr, _ := params["from"].(string)
+	toStr, _ := params["to"].(string)
+	amount, _ := params["amount"].(float64)
+	fee, _ := params["fee"].(float64)
+
+	if fromStr == "" || toStr == "" || amount == 0 {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "from, to and amount are required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	fromAddr := core.AddressFromString(fromStr)
+	toAddr := core.AddressFromString(toStr)
+
+	// Create transaction from UTXOs
+	tx, err := s.blockchain.CreateTransaction(fromAddr, toAddr, uint64(amount), uint64(fee))
+	if err != nil {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Transaction creation failed",
+				Data:    err.Error(),
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Serialize transaction for client to sign
+	inputs := make([]interface{}, 0, len(tx.Inputs))
+	for _, input := range tx.Inputs {
+		inputs = append(inputs, map[string]interface{}{
+			"previousTxHash": hex.EncodeToString(input.PreviousTxHash[:]),
+			"index":          input.Index,
+		})
+	}
+
+	outputs := make([]interface{}, 0, len(tx.Outputs))
+	for _, output := range tx.Outputs {
+		outputs = append(outputs, map[string]interface{}{
+			"address": hex.EncodeToString(output.Address[:]),
+			"amount":  output.Amount,
+		})
+	}
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result: map[string]interface{}{
+			"from":      hex.EncodeToString(tx.From[:]),
+			"to":        hex.EncodeToString(tx.To[:]),
+			"amount":    tx.Amount,
+			"fee":       tx.Fee,
+			"nonce":     tx.Nonce,
+			"gasUsed":   tx.GasUsed,
+			"gasPrice":  tx.GasPrice,
+			"data":      hex.EncodeToString(tx.Data),
+			"hash":      hex.EncodeToString(tx.Hash[:]),
+			"inputs":    inputs,
+			"outputs":   outputs,
+			"timestamp": tx.Timestamp.Unix(),
+		},
+		ID: req.ID,
+	}
+}
+
 // handleSendTransaction handles sendTransaction requests
 func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 	params, ok := req.Params.(map[string]interface{})
@@ -1227,7 +1314,96 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 		}
 	}
 
-	// Parse transaction fields
+	// Check if a fully signed transaction is provided
+	if txData, ok := params["transaction"].(map[string]interface{}); ok {
+		// Parse fully signed transaction
+		tx := core.Transaction{}
+
+		// Parse addresses
+		if fromStr, ok := txData["from"].(string); ok {
+			tx.From = core.AddressFromString(fromStr)
+		}
+		if toStr, ok := txData["to"].(string); ok {
+			tx.To = core.AddressFromString(toStr)
+		}
+
+		// Parse amounts
+		if amount, ok := txData["amount"].(float64); ok {
+			tx.Amount = uint64(amount)
+		}
+		if fee, ok := txData["fee"].(float64); ok {
+			tx.Fee = uint64(fee)
+		}
+		if nonce, ok := txData["nonce"].(float64); ok {
+			tx.Nonce = uint64(nonce)
+		}
+		if gasUsed, ok := txData["gasUsed"].(float64); ok {
+			tx.GasUsed = uint64(gasUsed)
+		}
+		if gasPrice, ok := txData["gasPrice"].(float64); ok {
+			tx.GasPrice = uint64(gasPrice)
+		}
+
+		// Parse signature and public key
+		if sigStr, ok := txData["signature"].(string); ok {
+			if sigBytes, err := hex.DecodeString(sigStr); err == nil {
+				tx.Signature = sigBytes
+			}
+		}
+		if pubKeyStr, ok := txData["publicKey"].(string); ok {
+			if pubKeyBytes, err := hex.DecodeString(pubKeyStr); err == nil {
+				tx.PublicKey = pubKeyBytes
+			}
+		}
+
+		// Parse hash
+		if hashStr, ok := txData["hash"].(string); ok {
+			if hashBytes, err := hex.DecodeString(hashStr); err == nil && len(hashBytes) == 32 {
+				copy(tx.Hash[:], hashBytes)
+			}
+		} else {
+			// Calculate hash if not provided
+			tx.Hash = tx.CalculateHash()
+		}
+
+		// Parse data
+		if dataStr, ok := txData["data"].(string); ok {
+			if dataBytes, err := hex.DecodeString(dataStr); err == nil {
+				tx.Data = dataBytes
+			}
+		}
+
+		// Validate signed transaction
+		consensusManager := core.NewConsensusManager(s.blockchain.GetGenesis())
+		if err := consensusManager.ValidateTransaction(&tx); err != nil {
+			return &RPCResponse{
+				JSONRPC: "2.0",
+				Error: &RPCError{
+					Code:    -32603,
+					Message: "Transaction validation failed",
+					Data:    err.Error(),
+				},
+				ID: req.ID,
+			}
+		}
+
+		// Add to mempool
+		s.blockchain.GetMempool().AddTransaction(&tx)
+
+		core.LogInfo("Signed transaction received - From: %s, To: %s, Amount: %d, Hash: %x",
+			hex.EncodeToString(tx.From[:]), hex.EncodeToString(tx.To[:]), tx.Amount, tx.Hash)
+
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Result: map[string]interface{}{
+				"txHash": hex.EncodeToString(tx.Hash[:]),
+				"status": "pending",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Parse transaction fields (legacy mode - server creates transaction)
 	fromStr, _ := params["from"].(string)
 	toStr, _ := params["to"].(string)
 	amount, _ := params["amount"].(float64)
@@ -1265,16 +1441,19 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 
 	core.LogInfo("Transaction created - From: %s, To: %s, Amount: %d, Hash: %x", fromStr, toStr, tx.Amount, tx.Hash)
 
-	// CRITICAL: Validate transaction before adding to mempool
-	// This ensures only valid transactions (with proper signatures) are accepted
+	// NOTE: Transaction created by server is not signed - validation will fail
+	// This is expected behavior - client should send signed transaction
+	// For now, we skip validation for server-created transactions (legacy mode)
+	// In production, all transactions should be signed by client
 	consensusManager := core.NewConsensusManager(s.blockchain.GetGenesis())
 	if err := consensusManager.ValidateTransaction(tx); err != nil {
+		// Return error indicating transaction needs to be signed
 		return &RPCResponse{
 			JSONRPC: "2.0",
 			Error: &RPCError{
 				Code:    -32603,
 				Message: "Transaction validation failed",
-				Data:    err.Error(),
+				Data:    "Transaction must be signed by client. Please send a fully signed transaction using the 'transaction' parameter.",
 			},
 			ID: req.ID,
 		}
