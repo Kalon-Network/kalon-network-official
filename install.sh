@@ -151,7 +151,7 @@ print_success "Directories created"
 # Step 4: Make binaries and scripts executable
 print_info "Step 4: Making binaries and scripts executable..."
 chmod +x build/kalon-miner-v2 build/kalon-wallet 2>/dev/null || true
-chmod +x miner-status.sh miner-logs.sh 2>/dev/null || true
+chmod +x miner-status.sh miner-logs.sh update.sh 2>/dev/null || true
 print_success "Binaries and scripts are ready"
 
 echo ""
