@@ -14,6 +14,11 @@ import (
 	"github.com/kalon-network/kalon/core"
 )
 
+const (
+	// MaxTransactionSizeBytes is the maximum size of a transaction in bytes (100 KB)
+	MaxTransactionSizeBytes = 100 * 1024
+)
+
 func init() {
 	// Set default log level for RPC server
 	core.SetLogLevelString("info")
@@ -1000,16 +1005,23 @@ func (s *ServerV2) parseBlockData(data map[string]interface{}) (*core.Block, err
 						tx.Data = dataBytes
 					}
 				}
-				// Parse signature (hex-encoded string)
+				// Parse signature (hex-encoded string from miner)
 				if sigStr, ok := txMap["signature"].(string); ok {
 					if sigBytes, err := hex.DecodeString(sigStr); err == nil {
 						tx.Signature = sigBytes
+					} else {
+						core.LogWarn("Failed to decode signature hex string: %v", err)
 					}
+				} else if signature, ok := txMap["signature"].([]byte); ok {
+					// Fallback: if sent as []byte (legacy)
+					tx.Signature = signature
 				}
-				// Parse public key (hex-encoded string)
+				// Parse public key (hex-encoded string from miner)
 				if pubKeyStr, ok := txMap["publicKey"].(string); ok {
 					if pubKeyBytes, err := hex.DecodeString(pubKeyStr); err == nil {
 						tx.PublicKey = pubKeyBytes
+					} else {
+						core.LogWarn("Failed to decode publicKey hex string: %v", err)
 					}
 				}
 				// Parse UTXO fields
@@ -1174,6 +1186,20 @@ func (s *ServerV2) handleGetMiningInfo(req *RPCRequest) *RPCResponse {
 		windowSize = 120 // Default window size
 	}
 	blockHistory := s.blockchain.GetBlockHistoryForDifficulty(bestBlock.Header.Number + 1)
+
+	// IMPORTANT: Include current time in blockHistory for RPC calls
+	// This ensures miners get the correct difficulty immediately, even if no blocks were found recently
+	// Without this, miners would mine with old difficulty until they find a block
+	currentTime := time.Now()
+	if len(blockHistory) > 0 {
+		// Extend blockHistory with current time as "virtual block"
+		// This allows CalculateDifficulty to consider time since last block
+		extendedHistory := make([]time.Time, len(blockHistory)+1)
+		copy(extendedHistory, blockHistory)
+		extendedHistory[len(blockHistory)] = currentTime
+		blockHistory = extendedHistory
+	}
+
 	difficulty := consensusManager.CalculateDifficulty(bestBlock.Header.Number+1, bestBlock, blockHistory)
 
 	// Get max mining threads from genesis config
@@ -1397,9 +1423,63 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 			}
 		}
 
+		// Parse inputs
+		if inputsData, ok := txData["inputs"].([]interface{}); ok {
+			for _, inputData := range inputsData {
+				if inputMap, ok := inputData.(map[string]interface{}); ok {
+					input := core.TxInput{}
+					if prevTxHashStr, ok := inputMap["previousTxHash"].(string); ok {
+						if prevTxHashBytes, err := hex.DecodeString(prevTxHashStr); err == nil && len(prevTxHashBytes) == 32 {
+							copy(input.PreviousTxHash[:], prevTxHashBytes)
+						}
+					}
+					if index, ok := inputMap["index"].(float64); ok {
+						input.Index = uint32(index)
+					}
+					tx.Inputs = append(tx.Inputs, input)
+				}
+			}
+		}
+
+		// Parse outputs
+		if outputsData, ok := txData["outputs"].([]interface{}); ok {
+			for _, outputData := range outputsData {
+				if outputMap, ok := outputData.(map[string]interface{}); ok {
+					output := core.TxOutput{}
+					if addrStr, ok := outputMap["address"].(string); ok {
+						output.Address = core.AddressFromString(addrStr)
+					}
+					if amount, ok := outputMap["amount"].(float64); ok {
+						output.Amount = uint64(amount)
+					}
+					tx.Outputs = append(tx.Outputs, output)
+				}
+			}
+		}
+
+		// Debug: Log transaction details before validation
+		core.LogInfo("Transaction before validation - From: %s, To: %s, Amount: %d, Fee: %d, Nonce: %d, Inputs: %d, Outputs: %d, HasSignature: %v, HasPublicKey: %v",
+			hex.EncodeToString(tx.From[:]), hex.EncodeToString(tx.To[:]), tx.Amount, tx.Fee, tx.Nonce, len(tx.Inputs), len(tx.Outputs), len(tx.Signature) > 0, len(tx.PublicKey) > 0)
+
+		// Check transaction size BEFORE validation (DoS protection)
+		txSize := estimateTransactionSize(&tx)
+		if txSize > MaxTransactionSizeBytes {
+			core.LogWarn("Transaction size exceeds limit: %d bytes (max: %d bytes)", txSize, MaxTransactionSizeBytes)
+			return &RPCResponse{
+				JSONRPC: "2.0",
+				Error: &RPCError{
+					Code:    -32603,
+					Message: "Transaction too large",
+					Data:    fmt.Sprintf("Transaction size (%d bytes) exceeds maximum allowed size (%d bytes)", txSize, MaxTransactionSizeBytes),
+				},
+				ID: req.ID,
+			}
+		}
+
 		// Validate signed transaction
 		consensusManager := core.NewConsensusManager(s.blockchain.GetGenesis())
 		if err := consensusManager.ValidateTransaction(&tx); err != nil {
+			core.LogInfo("Transaction validation failed: %v", err)
 			return &RPCResponse{
 				JSONRPC: "2.0",
 				Error: &RPCError{
@@ -1411,11 +1491,22 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 			}
 		}
 
-		// Add to mempool
-		s.blockchain.GetMempool().AddTransaction(&tx)
+		// Debug: Log transaction details before adding to mempool
+		core.LogInfo("Signed transaction received - From: %s, To: %s, Amount: %d, Hash: %x, Inputs: %d, Outputs: %d",
+			hex.EncodeToString(tx.From[:]), hex.EncodeToString(tx.To[:]), tx.Amount, tx.Hash, len(tx.Inputs), len(tx.Outputs))
 
-		core.LogInfo("Signed transaction received - From: %s, To: %s, Amount: %d, Hash: %x",
-			hex.EncodeToString(tx.From[:]), hex.EncodeToString(tx.To[:]), tx.Amount, tx.Hash)
+		// Add to mempool
+		if err := s.blockchain.GetMempool().AddTransaction(&tx); err != nil {
+			return &RPCResponse{
+				JSONRPC: "2.0",
+				Error: &RPCError{
+					Code:    -32603,
+					Message: "Failed to add transaction to mempool",
+					Data:    err.Error(),
+				},
+				ID: req.ID,
+			}
+		}
 
 		return &RPCResponse{
 			JSONRPC: "2.0",
@@ -1464,6 +1555,21 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 	}
 
 	core.LogInfo("Transaction created - From: %s, To: %s, Amount: %d, Hash: %x", fromStr, toStr, tx.Amount, tx.Hash)
+
+	// Check transaction size BEFORE validation (DoS protection)
+	txSize := estimateTransactionSize(tx)
+	if txSize > MaxTransactionSizeBytes {
+		core.LogWarn("Transaction size exceeds limit: %d bytes (max: %d bytes)", txSize, MaxTransactionSizeBytes)
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Transaction too large",
+				Data:    fmt.Sprintf("Transaction size (%d bytes) exceeds maximum allowed size (%d bytes)", txSize, MaxTransactionSizeBytes),
+			},
+			ID: req.ID,
+		}
+	}
 
 	// NOTE: Transaction created by server is not signed - validation will fail
 	// This is expected behavior - client should send signed transaction
@@ -1522,6 +1628,21 @@ func (s *ServerV2) writeError(w http.ResponseWriter, id interface{}, code int, m
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
+}
+
+// estimateTransactionSize estimates the size of a transaction in bytes
+// This is a local copy of the function from core/blockchain.go for use in RPC server
+func estimateTransactionSize(tx *core.Transaction) uint64 {
+	return 32 + // hash
+		uint64(20+20) + // from + to addresses
+		uint64(8+8) + // amount + fee
+		uint64(8) + // nonce
+		uint64(8+8) + // gasUsed + gasPrice
+		uint64(len(tx.Signature)+len(tx.PublicKey)) + // signature + public key
+		uint64(len(tx.Data)) + // data
+		uint64(len(tx.Inputs)*40) + // inputs (32-byte hash + 4-byte index + 4-byte signature estimate)
+		uint64(len(tx.Outputs)*28) + // outputs (20-byte address + 8-byte amount)
+		uint64(8) // timestamp
 }
 
 // limitConnections limits concurrent connections professionally
