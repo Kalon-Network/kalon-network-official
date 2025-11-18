@@ -17,6 +17,8 @@ import (
 const (
 	// MaxTransactionSizeBytes is the maximum size of a transaction in bytes (100 KB)
 	MaxTransactionSizeBytes = 100 * 1024
+	// MaxBlockSubmissionsPerMinute is the maximum number of block submissions per minute per IP
+	MaxBlockSubmissionsPerMinute = 2
 )
 
 func init() {
@@ -49,23 +51,24 @@ type RPCError struct {
 
 // ServerV2 represents a professional RPC server
 type ServerV2 struct {
-	addr        string
-	httpsAddr   string // HTTPS server address (e.g. ":16317")
-	certFile    string // SSL certificate file path
-	keyFile     string // SSL private key file path
-	blockchain  *core.BlockchainV2
-	p2pNetwork  interface{ GetPeerCount() int } // Interface for P2P network (optional)
-	mu          sync.RWMutex
-	connections map[string]*Connection
-	eventBus    *core.EventBus
-	ctx         context.Context
-	cancel      context.CancelFunc
-	allowedIPs  map[string]bool       // Whitelist of allowed IPs
-	rateLimits  map[string]*RateLimit // Rate limiting per IP
-	requireAuth bool                  // Whether auth is required
-	authTokens  map[string]bool       // Valid auth tokens
-	server      *http.Server          // HTTP server instance for shutdown
-	httpsServer *http.Server          // HTTPS server instance for shutdown
+	addr                  string
+	httpsAddr             string // HTTPS server address (e.g. ":16317")
+	certFile              string // SSL certificate file path
+	keyFile               string // SSL private key file path
+	blockchain            *core.BlockchainV2
+	p2pNetwork            interface{ GetPeerCount() int } // Interface for P2P network (optional)
+	mu                    sync.RWMutex
+	connections           map[string]*Connection
+	eventBus              *core.EventBus
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	allowedIPs            map[string]bool        // Whitelist of allowed IPs
+	rateLimits            map[string]*RateLimit  // Rate limiting per IP
+	blockSubmissionLimits map[string][]time.Time // Block submission timestamps per IP
+	requireAuth           bool                   // Whether auth is required
+	authTokens            map[string]bool        // Valid auth tokens
+	server                *http.Server           // HTTP server instance for shutdown
+	httpsServer           *http.Server           // HTTPS server instance for shutdown
 }
 
 // Connection represents a client connection
@@ -89,17 +92,18 @@ func NewServerV2(addr string, blockchain *core.BlockchainV2) *ServerV2 {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	server := &ServerV2{
-		addr:        addr,
-		blockchain:  blockchain,
-		p2pNetwork:  nil, // Will be set via SetP2PNetwork if needed
-		connections: make(map[string]*Connection),
-		eventBus:    blockchain.GetEventBus(),
-		ctx:         ctx,
-		cancel:      cancel,
-		allowedIPs:  make(map[string]bool),
-		rateLimits:  make(map[string]*RateLimit),
-		requireAuth: false, // For testnet: auth disabled by default
-		authTokens:  make(map[string]bool),
+		addr:                  addr,
+		blockchain:            blockchain,
+		p2pNetwork:            nil, // Will be set via SetP2PNetwork if needed
+		connections:           make(map[string]*Connection),
+		eventBus:              blockchain.GetEventBus(),
+		ctx:                   ctx,
+		cancel:                cancel,
+		allowedIPs:            make(map[string]bool),
+		rateLimits:            make(map[string]*RateLimit),
+		blockSubmissionLimits: make(map[string][]time.Time),
+		requireAuth:           false, // For testnet: auth disabled by default
+		authTokens:            make(map[string]bool),
 	}
 
 	// Start connection cleanup routine
@@ -301,6 +305,15 @@ func (s *ServerV2) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, nil, -32700, "Parse error", err.Error())
 		return
+	}
+
+	// Check block submission rate limit for submitBlock method
+	if req.Method == "submitBlock" {
+		if !s.checkBlockSubmissionRateLimit(ip) {
+			s.writeError(w, req.ID, -32603, "Block submission rate limit exceeded",
+				fmt.Sprintf("Maximum %d block submissions per minute per IP allowed", MaxBlockSubmissionsPerMinute))
+			return
+		}
 	}
 
 	// Handle request
@@ -1720,6 +1733,51 @@ func (s *ServerV2) extractIP(r *http.Request) string {
 		ip = strings.Split(r.RemoteAddr, ":")[0]
 	}
 	return ip
+}
+
+// checkBlockSubmissionRateLimit checks if block submission rate is within limits
+// Returns true if submission is allowed, false if rate limit exceeded
+func (s *ServerV2) checkBlockSubmissionRateLimit(ip string) bool {
+	// CRITICAL: Allow unlimited block submissions from localhost (for testing)
+	if ip == "127.0.0.1" || ip == "::1" || ip == "localhost" {
+		return true
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+
+	// Get or create submission history for this IP
+	submissions, exists := s.blockSubmissionLimits[ip]
+	if !exists {
+		submissions = make([]time.Time, 0)
+		s.blockSubmissionLimits[ip] = submissions
+	}
+
+	// Remove submissions older than 1 minute
+	validSubmissions := make([]time.Time, 0)
+	for _, ts := range submissions {
+		if now.Sub(ts) <= time.Minute {
+			validSubmissions = append(validSubmissions, ts)
+		}
+	}
+
+	// Check if limit exceeded
+	if len(validSubmissions) >= MaxBlockSubmissionsPerMinute {
+		core.LogWarn("Block submission rate limit exceeded for IP %s: %d submissions in last minute (max: %d)",
+			ip, len(validSubmissions), MaxBlockSubmissionsPerMinute)
+		return false
+	}
+
+	// Add current submission timestamp
+	validSubmissions = append(validSubmissions, now)
+	s.blockSubmissionLimits[ip] = validSubmissions
+
+	core.LogDebug("Block submission allowed for IP %s: %d/%d submissions in last minute",
+		ip, len(validSubmissions), MaxBlockSubmissionsPerMinute)
+
+	return true
 }
 
 // handleGetPeerCount handles getPeerCount requests
