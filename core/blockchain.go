@@ -44,7 +44,20 @@ type BlockPersister interface {
 type Mempool struct {
 	mu           sync.RWMutex
 	transactions map[string]*Transaction // Key: transaction hash
+	maxSize      int                     // Maximum number of transactions
+	maxMemoryMB  int                     // Maximum memory usage in MB
 }
+
+const (
+	// DefaultMempoolMaxSize is the default maximum number of transactions in mempool
+	DefaultMempoolMaxSize = 10000
+	// DefaultMempoolMaxMemoryMB is the default maximum memory usage in MB
+	DefaultMempoolMaxMemoryMB = 100
+	// DefaultMaxBlockSizeBytes is the default maximum block size in bytes
+	DefaultMaxBlockSizeBytes = 1024 * 1024 // 1 MB
+	// DefaultMaxTransactionsPerBlock is the default maximum number of transactions per block
+	DefaultMaxTransactionsPerBlock = 1000
+)
 
 // EventBus handles blockchain events
 type EventBus struct {
@@ -1172,19 +1185,106 @@ func (bc *BlockchainV2) GetEventBus() *EventBus {
 	return bc.eventBus
 }
 
-// NewMempool creates a new mempool
+// NewMempool creates a new mempool with default limits
 func NewMempool() *Mempool {
 	return &Mempool{
 		transactions: make(map[string]*Transaction),
+		maxSize:      DefaultMempoolMaxSize,
+		maxMemoryMB:  DefaultMempoolMaxMemoryMB,
+	}
+}
+
+// NewMempoolWithLimits creates a new mempool with custom limits
+func NewMempoolWithLimits(maxSize, maxMemoryMB int) *Mempool {
+	return &Mempool{
+		transactions: make(map[string]*Transaction),
+		maxSize:      maxSize,
+		maxMemoryMB:  maxMemoryMB,
 	}
 }
 
 // AddTransaction adds a transaction to the mempool
-func (m *Mempool) AddTransaction(tx *Transaction) {
+// Returns error if mempool is full and transaction has lower fee than existing transactions
+func (m *Mempool) AddTransaction(tx *Transaction) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.transactions[hex.EncodeToString(tx.Hash[:])] = tx
+
+	txHash := hex.EncodeToString(tx.Hash[:])
+
+	// Check if transaction already exists
+	if _, exists := m.transactions[txHash]; exists {
+		return nil // Already in mempool
+	}
+
+	// Check size limit
+	if len(m.transactions) >= m.maxSize {
+		// Try to remove lowest fee transaction to make space
+		if !m.removeLowestFeeTransaction() {
+			return fmt.Errorf("mempool is full (max %d transactions)", m.maxSize)
+		}
+	}
+
+	// Estimate transaction size
+	estimatedSize := estimateTransactionSize(tx)
+
+	// Check memory limit
+	if len(m.transactions) > 0 {
+		avgTxSize := estimatedSize
+		estimatedTotalMB := (uint64(len(m.transactions)) * avgTxSize) / (1024 * 1024)
+		if estimatedTotalMB >= uint64(m.maxMemoryMB) {
+			// Try to remove lowest fee transaction to make space
+			if !m.removeLowestFeeTransaction() {
+				return fmt.Errorf("mempool memory limit reached (max %d MB)", m.maxMemoryMB)
+			}
+		}
+	}
+
+	m.transactions[txHash] = tx
 	LogDebug("Transaction added to mempool: %x", tx.Hash)
+	return nil
+}
+
+// estimateTransactionSize estimates the size of a transaction in bytes
+func estimateTransactionSize(tx *Transaction) uint64 {
+	return 32 + // hash
+		uint64(20+20) + // from + to addresses
+		uint64(8+8) + // amount + fee
+		uint64(8) + // nonce
+		uint64(8+8) + // gasUsed + gasPrice
+		uint64(len(tx.Signature)+len(tx.PublicKey)) + // signature + public key
+		uint64(len(tx.Data)) + // data
+		uint64(len(tx.Inputs)*40) + // inputs (32-byte hash + 4-byte index + 4-byte signature estimate)
+		uint64(len(tx.Outputs)*28) + // outputs (20-byte address + 8-byte amount)
+		uint64(8) // timestamp
+}
+
+// removeLowestFeeTransaction removes the transaction with the lowest fee
+// Returns true if a transaction was removed, false otherwise
+func (m *Mempool) removeLowestFeeTransaction() bool {
+	if len(m.transactions) == 0 {
+		return false
+	}
+
+	var lowestFeeTx *Transaction
+	var lowestFeeTxHash string
+	lowestFee := ^uint64(0) // Max uint64
+
+	// Find transaction with lowest fee
+	for hash, tx := range m.transactions {
+		if tx.Fee < lowestFee {
+			lowestFee = tx.Fee
+			lowestFeeTx = tx
+			lowestFeeTxHash = hash
+		}
+	}
+
+	if lowestFeeTx != nil {
+		delete(m.transactions, lowestFeeTxHash)
+		LogDebug("Removed lowest fee transaction from mempool: %x (fee: %d)", lowestFeeTx.Hash, lowestFee)
+		return true
+	}
+
+	return false
 }
 
 // GetPendingTransactions returns all pending transactions
@@ -1258,8 +1358,69 @@ func (bc *BlockchainV2) CreateNewBlockV2(miner Address, txs []Transaction) *Bloc
 
 	// Get pending transactions from mempool
 	pendingTxs := bc.mempool.GetPendingTransactions()
-	for _, tx := range pendingTxs {
-		txs = append(txs, *tx)
+
+	// Sort transactions by fee (highest first) for fair inclusion
+	sortedTxs := make([]*Transaction, len(pendingTxs))
+	copy(sortedTxs, pendingTxs)
+
+	// Sort by fee descending
+	for i := 0; i < len(sortedTxs)-1; i++ {
+		for j := i + 1; j < len(sortedTxs); j++ {
+			if sortedTxs[i].Fee < sortedTxs[j].Fee {
+				sortedTxs[i], sortedTxs[j] = sortedTxs[j], sortedTxs[i]
+			}
+		}
+	}
+
+	// Select transactions based on block size and transaction count limits
+	selectedTxs := []Transaction{}
+	currentBlockSize := uint64(0) // Will be calculated including reward transactions
+	maxTxs := DefaultMaxTransactionsPerBlock
+
+	// Estimate size of reward transactions
+	minerRewardTxSize := estimateTransactionSize(&minerRewardTx)
+	treasuryRewardTxSize := uint64(0)
+	if treasuryRewardTx != nil {
+		treasuryRewardTxSize = estimateTransactionSize(treasuryRewardTx)
+	}
+	baseBlockSize := minerRewardTxSize + treasuryRewardTxSize
+
+	// Select transactions up to limits
+	for _, tx := range sortedTxs {
+		txSize := estimateTransactionSize(tx)
+
+		// Check if adding this transaction would exceed limits
+		if len(selectedTxs) >= maxTxs {
+			LogDebug("Block transaction limit reached: %d transactions", maxTxs)
+			break
+		}
+
+		if currentBlockSize+baseBlockSize+txSize > DefaultMaxBlockSizeBytes {
+			LogDebug("Block size limit would be exceeded: current=%d, tx=%d, max=%d",
+				currentBlockSize+baseBlockSize, txSize, DefaultMaxBlockSizeBytes)
+			break
+		}
+
+		selectedTxs = append(selectedTxs, *tx)
+		currentBlockSize += txSize
+	}
+
+	// Recalculate transaction fees based on selected transactions
+	txFees = uint64(0)
+	for _, tx := range selectedTxs {
+		txFees += tx.Fee
+	}
+
+	// Recalculate block reward distribution with actual fees
+	blockRewardDist = bc.genesis.CalculateNetworkFees(baseReward, txFees)
+
+	// Update miner reward transaction with correct amount
+	minerRewardTx = bc.createBlockRewardTransaction(miner, blockRewardDist.MinerReward)
+
+	// Update treasury reward transaction if needed
+	if blockRewardDist.TreasuryReward > 0 && bc.genesis.TreasuryAddress != "" {
+		treasuryAddr := AddressFromString(bc.genesis.TreasuryAddress)
+		treasuryRewardTx = bc.createBlockRewardTransactionPtr(treasuryAddr, blockRewardDist.TreasuryReward)
 	}
 
 	// Add reward transactions to the beginning of transactions
@@ -1267,7 +1428,12 @@ func (bc *BlockchainV2) CreateNewBlockV2(miner Address, txs []Transaction) *Bloc
 	if treasuryRewardTx != nil {
 		allTxs = append(allTxs, *treasuryRewardTx)
 	}
-	allTxs = append(allTxs, txs...)
+	allTxs = append(allTxs, selectedTxs...)
+
+	// Log block size information
+	estimatedBlockSize := baseBlockSize + currentBlockSize
+	LogDebug("Block created - Transactions: %d (selected from %d pending), Estimated size: %d bytes (max: %d)",
+		len(selectedTxs), len(pendingTxs), estimatedBlockSize, DefaultMaxBlockSizeBytes)
 
 	// Calculate merkle root from all transactions
 	merkleRoot := consensusManager.CalculateMerkleRoot(allTxs)
