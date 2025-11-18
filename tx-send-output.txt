@@ -1,0 +1,1 @@
+2025/11/18 14:48:34 Failed to send transaction: RPC error preparing transaction: Transaction creation failed

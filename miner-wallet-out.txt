@@ -1,0 +1,1 @@
+2025/11/18 14:39:20 Wallet file already exists: wallet-miner-wallet.json. Use --name to create a different wallet.
