@@ -291,12 +291,6 @@ func (s *ServerV2) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check rate limit
-	if !s.checkRateLimit(ip) {
-		http.Error(w, "Too many requests", http.StatusTooManyRequests)
-		return
-	}
-
 	// Track connection
 	s.trackConnection(ip)
 
@@ -305,6 +299,36 @@ func (s *ServerV2) handleRequest(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, nil, -32700, "Parse error", err.Error())
 		return
+	}
+
+	// CRITICAL: Exclude read-only methods from rate limiting
+	// createBlockTemplate is called frequently by miners and is safe (read-only)
+	readOnlyMethods := map[string]bool{
+		"createBlockTemplate":    true,
+		"getHeight":              true,
+		"getBestBlock":           true,
+		"getMiningInfo":          true,
+		"getBalance":             true,
+		"getRecentBlocks":        true,
+		"getPendingTransactions": true,
+		"getTotalTransactions":   true,
+		"getAddressCount":        true,
+		"getTreasuryBalance":     true,
+		"getHashrate":            true,
+		"getAddressInfo":         true,
+		"getAddressTransactions": true,
+		"getBlockByHash":         true,
+		"getBlockByNumber":       true,
+		"getPeerCount":           true,
+		"getSnapshot":            true,
+	}
+
+	// Only apply rate limiting to write operations
+	if !readOnlyMethods[req.Method] {
+		if !s.checkRateLimit(ip) {
+			http.Error(w, "Too many requests", http.StatusTooManyRequests)
+			return
+		}
 	}
 
 	// Check block submission rate limit for submitBlock method
@@ -1931,20 +1955,26 @@ func (s *ServerV2) handleGetAddressInfo(req *RPCRequest) *RPCResponse {
 	totalReceived := uint64(0)
 
 	for _, tx := range transactions {
+		// Check if address sent this transaction
 		if tx.From == address {
 			sentCount++
 			totalSent += tx.Amount + tx.Fee
 		}
-		if tx.To == address {
-			receivedCount++
-			totalReceived += tx.Amount
-		}
-		// Also check outputs
+
+		// Check outputs for received amounts (UTXO-based)
+		// This is the correct way - outputs contain the actual received amounts
 		for _, output := range tx.Outputs {
 			if output.Address == address {
 				receivedCount++
 				totalReceived += output.Amount
 			}
+		}
+
+		// Also check tx.To for simple transactions (if no outputs exist)
+		// But only if we haven't already counted it in outputs
+		if len(tx.Outputs) == 0 && tx.To == address {
+			receivedCount++
+			totalReceived += tx.Amount
 		}
 	}
 

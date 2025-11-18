@@ -390,12 +390,22 @@ func (rpc *RPCBlockchainV2) CreateNewBlock(miner core.Address, txs []core.Transa
 
 	resp, err := rpc.callRPC(req)
 	if err != nil {
-		core.LogError("Failed to create block template: %v", err)
+		// Check if it's a rate limit error (429) - log as debug to reduce noise
+		if strings.Contains(err.Error(), "429") || strings.Contains(err.Error(), "Too many requests") {
+			core.LogDebug("Rate limit hit for createBlockTemplate (will retry): %v", err)
+		} else {
+			core.LogError("Failed to create block template: %v", err)
+		}
 		return nil
 	}
 
 	if resp.Error != nil {
-		core.LogError("RPC error: %s", resp.Error.Message)
+		// Check if it's a rate limit error - log as debug to reduce noise
+		if strings.Contains(resp.Error.Message, "rate limit") || strings.Contains(resp.Error.Message, "429") {
+			core.LogDebug("Rate limit hit for createBlockTemplate (will retry): %s", resp.Error.Message)
+		} else {
+			core.LogError("RPC error: %s", resp.Error.Message)
+		}
 		return nil
 	}
 
@@ -782,6 +792,10 @@ func (rpc *RPCBlockchainV2) callRPC(req RPCRequest) (*RPCResponse, error) {
 	}
 
 	// All retries failed
+	// Check if it's a rate limit error (429) - use less verbose error message
+	if lastResp != nil && lastResp.StatusCode == 429 {
+		return nil, fmt.Errorf("rate limit exceeded (status: 429)")
+	}
 	if lastResp != nil {
 		return nil, fmt.Errorf("RPC call failed after %d attempts, last error: %v (status: %d)", maxRetries, lastErr, lastResp.StatusCode)
 	}
