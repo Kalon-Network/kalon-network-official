@@ -202,10 +202,10 @@ func (cm *ConsensusManager) CalculateDifficulty(height uint64, parent *Block, bl
 	if len(blockHistory) > 0 {
 		lastBlockTime := blockHistory[len(blockHistory)-1]
 		timeSinceLastBlock := time.Since(lastBlockTime)
-		
+
 		// Reset to initial difficulty after 10 minutes of no blocks
 		if timeSinceLastBlock > 10*time.Minute {
-			log.Printf("Difficulty-Timeout: No blocks for %v, resetting difficulty to initial (%d)", timeSinceLastBlock, cm.genesis.Difficulty.InitialDifficulty)
+			LogDebug("Difficulty-Timeout: No blocks for %v, resetting difficulty to initial (%d)", timeSinceLastBlock, cm.genesis.Difficulty.InitialDifficulty)
 			return cm.genesis.Difficulty.InitialDifficulty
 		}
 	}
@@ -213,6 +213,48 @@ func (cm *ConsensusManager) CalculateDifficulty(height uint64, parent *Block, bl
 	// Calculate LWMA (Linear Weighted Moving Average)
 	// Weight more recent blocks more heavily
 	targetBlockTime := time.Duration(cm.genesis.BlockTimeTarget) * time.Second
+
+	// IMPORTANT: Include time since last block in LWMA calculation
+	// This ensures difficulty adjusts immediately when blocks are found slowly
+	// Without this, LWMA would only use old fast blocks and difficulty would keep rising
+	currentTime := time.Now()
+	if len(blockHistory) > 0 {
+		lastBlockTime := blockHistory[len(blockHistory)-1]
+		timeSinceLastBlock := currentTime.Sub(lastBlockTime)
+
+		// If significant time has passed since last block (> 2x targetBlockTime)
+		// immediately reduce difficulty (don't wait for LWMA)
+		if timeSinceLastBlock > targetBlockTime*2 {
+			// Calculate reduction factor based on wait time
+			// Longer wait = stronger reduction
+			reductionFactor := float64(targetBlockTime) / float64(timeSinceLastBlock)
+
+			// Limit reduction (max 50% per adjustment to avoid too aggressive drops)
+			if reductionFactor < 0.5 {
+				reductionFactor = 0.5
+			}
+
+			newDifficulty := uint64(float64(parent.Header.Difficulty) * reductionFactor)
+
+			// Respect MinDifficulty
+			if cm.genesis.Difficulty.MinDifficulty > 0 && newDifficulty < cm.genesis.Difficulty.MinDifficulty {
+				newDifficulty = cm.genesis.Difficulty.MinDifficulty
+			}
+
+			log.Printf("Difficulty-QuickAdjust: %v since last block, reducing from %d to %d (factor: %.2f)",
+				timeSinceLastBlock, parent.Header.Difficulty, newDifficulty, reductionFactor)
+			return newDifficulty
+		}
+
+		// Extend blockHistory with current time as "virtual block"
+		// This includes the wait time in LWMA calculation
+		extendedHistory := make([]time.Time, len(blockHistory)+1)
+		copy(extendedHistory, blockHistory)
+		extendedHistory[len(blockHistory)] = currentTime
+
+		// Use extendedHistory for LWMA calculation
+		blockHistory = extendedHistory
+	}
 
 	// Calculate weighted average block time
 	var weightSum float64
@@ -268,12 +310,12 @@ func (cm *ConsensusManager) CalculateDifficulty(height uint64, parent *Block, bl
 
 	// Apply difficulty caps from genesis config (if configured)
 	if cm.genesis.Difficulty.MaxDifficulty > 0 && newDifficulty > cm.genesis.Difficulty.MaxDifficulty {
-		log.Printf("Difficulty capped at maximum: %d (calculated: %d)", cm.genesis.Difficulty.MaxDifficulty, newDifficulty)
+		LogDebug("Difficulty capped at maximum: %d (calculated: %d)", cm.genesis.Difficulty.MaxDifficulty, newDifficulty)
 		newDifficulty = cm.genesis.Difficulty.MaxDifficulty
 	}
 
 	if cm.genesis.Difficulty.MinDifficulty > 0 && newDifficulty < cm.genesis.Difficulty.MinDifficulty {
-		log.Printf("Difficulty floored at minimum: %d (calculated: %d)", cm.genesis.Difficulty.MinDifficulty, newDifficulty)
+		LogDebug("Difficulty floored at minimum: %d (calculated: %d)", cm.genesis.Difficulty.MinDifficulty, newDifficulty)
 		newDifficulty = cm.genesis.Difficulty.MinDifficulty
 	}
 
