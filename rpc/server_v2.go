@@ -69,6 +69,8 @@ type ServerV2 struct {
 	authTokens            map[string]bool        // Valid auth tokens
 	server                *http.Server           // HTTP server instance for shutdown
 	httpsServer           *http.Server           // HTTPS server instance for shutdown
+	minerNames            map[core.Address]string // Miner names by address
+	walletNames           map[core.Address]string // Wallet names by address
 }
 
 // Connection represents a client connection
@@ -104,6 +106,8 @@ func NewServerV2(addr string, blockchain *core.BlockchainV2) *ServerV2 {
 		blockSubmissionLimits: make(map[string][]time.Time),
 		requireAuth:           false, // For testnet: auth disabled by default
 		authTokens:            make(map[string]bool),
+		minerNames:            make(map[core.Address]string),
+		walletNames:           make(map[core.Address]string),
 	}
 
 	// Start connection cleanup routine
@@ -424,6 +428,12 @@ func (s *ServerV2) handleRPCMethod(req *RPCRequest) *RPCResponse {
 		return s.handleGetBlockByHash(req)
 	case "getBlockByNumber":
 		return s.handleGetBlockByNumber(req)
+	case "getMinerName":
+		return s.handleGetMinerName(req)
+	case "setWalletName":
+		return s.handleSetWalletName(req)
+	case "getWalletName":
+		return s.handleGetWalletName(req)
 	default:
 		return &RPCResponse{
 			JSONRPC: "2.0",
@@ -914,6 +924,15 @@ func (s *ServerV2) handleSubmitBlockV2(req *RPCRequest) (response *RPCResponse) 
 			},
 			ID: req.ID,
 		}
+	}
+
+	// Save miner name if provided
+	if minerName, ok := params["minerName"].(string); ok && minerName != "" {
+		minerAddr := block.Header.Miner
+		s.mu.Lock()
+		s.minerNames[minerAddr] = minerName
+		s.mu.Unlock()
+		core.LogDebug("Miner name saved: %s -> %s", minerAddr.String(), minerName)
 	}
 
 	// Submit block to blockchain using V2 function
@@ -1823,6 +1842,172 @@ func (s *ServerV2) handleGetPeerCount(req *RPCRequest) *RPCResponse {
 	return &RPCResponse{
 		JSONRPC: "2.0",
 		Result:  0,
+		ID:      req.ID,
+	}
+}
+
+// handleGetMinerName handles getMinerName requests
+func (s *ServerV2) handleGetMinerName(req *RPCRequest) *RPCResponse {
+	params, ok := req.Params.(map[string]interface{})
+	if !ok {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+			},
+			ID: req.ID,
+		}
+	}
+
+	addressStr, ok := params["address"].(string)
+	if !ok || addressStr == "" {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "address parameter required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Parse address
+	address := core.AddressFromString(addressStr)
+
+	// Get miner name
+	s.mu.RLock()
+	minerName, exists := s.minerNames[address]
+	s.mu.RUnlock()
+
+	if !exists || minerName == "" {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Result:  nil, // No name set
+			ID:      req.ID,
+		}
+	}
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result:  minerName,
+		ID:      req.ID,
+	}
+}
+
+// handleSetWalletName handles setWalletName requests
+func (s *ServerV2) handleSetWalletName(req *RPCRequest) *RPCResponse {
+	params, ok := req.Params.(map[string]interface{})
+	if !ok {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+			},
+			ID: req.ID,
+		}
+	}
+
+	addressStr, ok := params["address"].(string)
+	if !ok || addressStr == "" {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "address parameter required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	walletName, ok := params["name"].(string)
+	if !ok {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "name parameter required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Parse address
+	address := core.AddressFromString(addressStr)
+
+	// Save wallet name
+	s.mu.Lock()
+	if walletName == "" {
+		// Remove name if empty string
+		delete(s.walletNames, address)
+	} else {
+		s.walletNames[address] = walletName
+	}
+	s.mu.Unlock()
+
+	core.LogDebug("Wallet name saved: %s -> %s", address.String(), walletName)
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result: map[string]interface{}{
+			"success": true,
+			"address": addressStr,
+			"name":    walletName,
+		},
+		ID: req.ID,
+	}
+}
+
+// handleGetWalletName handles getWalletName requests
+func (s *ServerV2) handleGetWalletName(req *RPCRequest) *RPCResponse {
+	params, ok := req.Params.(map[string]interface{})
+	if !ok {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+			},
+			ID: req.ID,
+		}
+	}
+
+	addressStr, ok := params["address"].(string)
+	if !ok || addressStr == "" {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "address parameter required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Parse address
+	address := core.AddressFromString(addressStr)
+
+	// Get wallet name
+	s.mu.RLock()
+	walletName, exists := s.walletNames[address]
+	s.mu.RUnlock()
+
+	if !exists || walletName == "" {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Result:  nil, // No name set
+			ID:      req.ID,
+		}
+	}
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result:  walletName,
 		ID:      req.ID,
 	}
 }
