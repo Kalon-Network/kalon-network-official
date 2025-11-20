@@ -62,13 +62,13 @@ type ServerV2 struct {
 	eventBus              *core.EventBus
 	ctx                   context.Context
 	cancel                context.CancelFunc
-	allowedIPs            map[string]bool        // Whitelist of allowed IPs
-	rateLimits            map[string]*RateLimit  // Rate limiting per IP
-	blockSubmissionLimits map[string][]time.Time // Block submission timestamps per IP
-	requireAuth           bool                   // Whether auth is required
-	authTokens            map[string]bool        // Valid auth tokens
-	server                *http.Server           // HTTP server instance for shutdown
-	httpsServer           *http.Server           // HTTPS server instance for shutdown
+	allowedIPs            map[string]bool         // Whitelist of allowed IPs
+	rateLimits            map[string]*RateLimit   // Rate limiting per IP
+	blockSubmissionLimits map[string][]time.Time  // Block submission timestamps per IP
+	requireAuth           bool                    // Whether auth is required
+	authTokens            map[string]bool         // Valid auth tokens
+	server                *http.Server            // HTTP server instance for shutdown
+	httpsServer           *http.Server            // HTTPS server instance for shutdown
 	minerNames            map[core.Address]string // Miner names by address
 	walletNames           map[core.Address]string // Wallet names by address
 }
@@ -1808,7 +1808,7 @@ func (s *ServerV2) checkBlockSubmissionRateLimit(ip string) bool {
 
 	// Check if limit exceeded
 	if len(validSubmissions) >= MaxBlockSubmissionsPerMinute {
-		core.LogWarn("Block submission rate limit exceeded for IP %s: %d submissions in last minute (max: %d)",
+		core.LogDebug("Block submission rate limit exceeded for IP %s: %d submissions in last minute (max: %d)",
 			ip, len(validSubmissions), MaxBlockSubmissionsPerMinute)
 		return false
 	}

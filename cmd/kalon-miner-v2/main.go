@@ -297,7 +297,12 @@ func (m *MinerV2) handleBlockFound(block *core.Block, workerID int, duration tim
 
 	// Submit block
 	if err := m.blockchain.AddBlock(block); err != nil {
-		core.LogError("Failed to submit block: %v", err)
+		// Rate limit errors are expected behavior, log as debug
+		if strings.Contains(err.Error(), "rate limit") || strings.Contains(err.Error(), "Block submission rate limit exceeded") {
+			core.LogDebug("Block submission rate limit exceeded (expected): %v", err)
+		} else {
+			core.LogError("Failed to submit block: %v", err)
+		}
 	} else {
 		if rewardAmount > 0 {
 			core.LogInfo("✅ Block #%d submitted successfully! Reward: %.2f tKALON (Hash: %x)",
