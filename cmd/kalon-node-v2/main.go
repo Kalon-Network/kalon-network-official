@@ -563,27 +563,25 @@ func (n *NodeV2) syncBlocks() {
 				peerID := peer.ID
 
 				// CRITICAL: Smart sync strategy
-				// If we're stuck at low height, we need to ensure we have the correct chain
+				// Normal case: sync from currentHeight + 1
+				// Only sync from block 1 if we're very early (< 10) or if we detect chain issues
 				var startHeight uint64
 				
-				// If we're at a low height (< 200), sync from block 1 to ensure complete correct chain
-				// This fixes chain mismatches where blocks have wrong parent hashes
-				if currentHeight < 200 {
-					// Force full re-sync from block 1 to ensure correct chain
-					// This is necessary when parent hashes don't match
+				if currentHeight < 10 {
+					// Very early in sync, start from block 1 to ensure complete chain
 					startHeight = 1
-					core.LogInfo("🔄 Re-syncing from block 1 to fix chain (current height: %d)", currentHeight)
+					core.LogInfo("🔄 Starting initial sync from block 1 (current height: %d)", currentHeight)
 				} else {
 					// Normal sync: request blocks starting from current height + 1
 					startHeight = currentHeight + 1
 				}
 
-				// Request blocks in batches of 100
+				// Request blocks in batches of 100 (limit from get_blocks handler)
 				endHeight := startHeight + 99
 
-				// Only request if we're behind (but always allow re-syncing from block 1)
-				if startHeight > currentHeight+1 && currentHeight >= 200 {
-					// Too far ahead, skip (but allow re-sync from block 1)
+				// Only request if we're behind
+				if startHeight <= currentHeight {
+					// Already have these blocks, skip
 					continue
 				}
 
