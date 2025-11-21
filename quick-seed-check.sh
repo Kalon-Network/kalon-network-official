@@ -23,22 +23,44 @@ echo ""
 # 3. RPC Port prüfen
 echo "3️⃣  RPC PORT (16316):"
 echo "----------------------------------------"
-if sudo netstat -tulpn | grep 16316 > /dev/null; then
-    echo "✅ Port 16316 ist offen:"
-    sudo netstat -tulpn | grep 16316
+if command -v ss > /dev/null; then
+    if sudo ss -tulpn | grep 16316 > /dev/null; then
+        echo "✅ Port 16316 ist offen:"
+        sudo ss -tulpn | grep 16316
+    else
+        echo "❌ Port 16316 ist NICHT offen!"
+    fi
+elif command -v netstat > /dev/null; then
+    if sudo netstat -tulpn | grep 16316 > /dev/null; then
+        echo "✅ Port 16316 ist offen:"
+        sudo netstat -tulpn | grep 16316
+    else
+        echo "❌ Port 16316 ist NICHT offen!"
+    fi
 else
-    echo "❌ Port 16316 ist NICHT offen!"
+    echo "⚠️  ss und netstat nicht verfügbar - Port-Check übersprungen"
 fi
 echo ""
 
 # 4. P2P Port prüfen
 echo "4️⃣  P2P PORT (17335):"
 echo "----------------------------------------"
-if sudo netstat -tulpn | grep 17335 > /dev/null; then
-    echo "✅ Port 17335 ist offen:"
-    sudo netstat -tulpn | grep 17335
+if command -v ss > /dev/null; then
+    if sudo ss -tulpn | grep 17335 > /dev/null; then
+        echo "✅ Port 17335 ist offen:"
+        sudo ss -tulpn | grep 17335
+    else
+        echo "❌ Port 17335 ist NICHT offen!"
+    fi
+elif command -v netstat > /dev/null; then
+    if sudo netstat -tulpn | grep 17335 > /dev/null; then
+        echo "✅ Port 17335 ist offen:"
+        sudo netstat -tulpn | grep 17335
+    else
+        echo "❌ Port 17335 ist NICHT offen!"
+    fi
 else
-    echo "❌ Port 17335 ist NICHT offen!"
+    echo "⚠️  ss und netstat nicht verfügbar - Port-Check übersprungen"
 fi
 echo ""
 
@@ -118,14 +140,37 @@ else
     echo "✅ Node-Prozess läuft"
 fi
 
-if ! sudo netstat -tulpn | grep -q 16316; then
+# Port-Check mit ss oder netstat
+PORT_CHECK_FAILED=false
+if command -v ss > /dev/null; then
+    if ! sudo ss -tulpn | grep -q 16316; then
+        PORT_CHECK_FAILED=true
+    fi
+elif command -v netstat > /dev/null; then
+    if ! sudo netstat -tulpn | grep -q 16316; then
+        PORT_CHECK_FAILED=true
+    fi
+fi
+
+if [ "$PORT_CHECK_FAILED" = true ]; then
     echo "❌ RPC Port (16316) ist NICHT offen"
     ERRORS=$((ERRORS + 1))
 else
     echo "✅ RPC Port (16316) ist offen"
 fi
 
-if ! sudo netstat -tulpn | grep -q 17335; then
+PORT_CHECK_FAILED=false
+if command -v ss > /dev/null; then
+    if ! sudo ss -tulpn | grep -q 17335; then
+        PORT_CHECK_FAILED=true
+    fi
+elif command -v netstat > /dev/null; then
+    if ! sudo netstat -tulpn | grep -q 17335; then
+        PORT_CHECK_FAILED=true
+    fi
+fi
+
+if [ "$PORT_CHECK_FAILED" = true ]; then
     echo "❌ P2P Port (17335) ist NICHT offen"
     ERRORS=$((ERRORS + 1))
 else
