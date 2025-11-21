@@ -206,9 +206,10 @@ func (cm *ConsensusManager) CalculateDifficultyWithTimestamp(height uint64, pare
 
 	// Difficulty-Timeout: Reset to initial difficulty if no blocks found for 10 minutes
 	// This prevents the difficulty from getting stuck too high when all miners are stopped
+	// CRITICAL: Use blockTimestamp instead of time.Now() for consistent validation
 	if len(blockHistory) > 0 {
 		lastBlockTime := blockHistory[len(blockHistory)-1]
-		timeSinceLastBlock := time.Since(lastBlockTime)
+		timeSinceLastBlock := blockTimestamp.Sub(lastBlockTime)
 
 		// Reset to initial difficulty after 10 minutes of no blocks
 		if timeSinceLastBlock > 10*time.Minute {
