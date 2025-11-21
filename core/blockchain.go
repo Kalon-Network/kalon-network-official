@@ -635,7 +635,11 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 	blockHistory := bc.blockHistory.GetWindow(windowSize)
 	// CRITICAL: Use block's timestamp instead of time.Now() for difficulty calculation
 	// This ensures consistent difficulty validation regardless of when the block is received
+	// DEBUG: Log difficulty calculation details
+	LogDebug("Difficulty validation for block #%d: parent #%d difficulty=%d, blockHistory len=%d, blockTimestamp=%v",
+		block.Header.Number, parent.Header.Number, parent.Header.Difficulty, len(blockHistory), block.Header.Timestamp)
 	expectedDifficulty := consensusManager.CalculateDifficultyWithTimestamp(block.Header.Number, parent, blockHistory, block.Header.Timestamp)
+	LogDebug("Difficulty validation result: expected=%d, block has=%d", expectedDifficulty, block.Header.Difficulty)
 
 	// Allow difficulty to be within MinDifficulty/MaxDifficulty range (due to caps)
 	minDiff := bc.genesis.Difficulty.MinDifficulty
