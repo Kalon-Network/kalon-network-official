@@ -643,7 +643,22 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 	// If history is incomplete, difficulty calculation may be inaccurate
 	// In this case, we should be more lenient with difficulty validation
 	historyIncomplete := false
-	if len(blockHistory) > 1 {
+	
+	// Method 1: Check if we have fewer blocks in history than expected
+	// If we're at block N but only have M blocks in history (where M << N), history is incomplete
+	expectedHistorySize := windowSize
+	if block.Header.Number < uint64(windowSize) {
+		expectedHistorySize = int(block.Header.Number) + 1 // +1 for genesis
+	}
+	if len(blockHistory) < expectedHistorySize/2 {
+		// If we have less than half the expected blocks, history is definitely incomplete
+		historyIncomplete = true
+		LogDebug("Block history incomplete: have %d blocks, expected ~%d (at block #%d)", 
+			len(blockHistory), expectedHistorySize, block.Header.Number)
+	}
+	
+	// Method 2: Check for large gaps in block history timestamps (indicates missing blocks)
+	if !historyIncomplete && len(blockHistory) > 1 {
 		// Check for large gaps in block history (indicates missing blocks)
 		for i := 1; i < len(blockHistory); i++ {
 			timeDiff := blockHistory[i].Sub(blockHistory[i-1])
@@ -655,7 +670,7 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 			}
 		}
 	}
-	
+
 	expectedDifficulty := consensusManager.CalculateDifficultyWithTimestamp(block.Header.Number, parent, blockHistory, block.Header.Timestamp)
 	LogDebug("Difficulty validation result: expected=%d, block has=%d, historyIncomplete=%v", expectedDifficulty, block.Header.Difficulty, historyIncomplete)
 
@@ -678,7 +693,7 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 	if difficultyDiff < 0 {
 		difficultyDiff = -difficultyDiff
 	}
-	
+
 	// Determine max allowed difference based on history completeness
 	maxAllowedDiff := int64(1) // Default: ±1 for rounding
 	if historyIncomplete {
@@ -689,14 +704,14 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 		}
 		LogDebug("Difficulty validation with incomplete history: allowing ±%d tolerance", maxAllowedDiff)
 	}
-	
+
 	if difficultyDiff > maxAllowedDiff {
 		// Only reject if difference exceeds tolerance
-		return fmt.Errorf("invalid difficulty: expected %d, got %d (diff: %d, max allowed: %d, historyIncomplete: %v)", 
+		return fmt.Errorf("invalid difficulty: expected %d, got %d (diff: %d, max allowed: %d, historyIncomplete: %v)",
 			expectedDifficulty, block.Header.Difficulty, difficultyDiff, maxAllowedDiff, historyIncomplete)
 	} else if difficultyDiff > 0 {
 		// Log warning but allow (within tolerance)
-		LogDebug("Difficulty tolerance: expected %d, got %d (allowing ±%d tolerance, historyIncomplete: %v)", 
+		LogDebug("Difficulty tolerance: expected %d, got %d (allowing ±%d tolerance, historyIncomplete: %v)",
 			expectedDifficulty, block.Header.Difficulty, maxAllowedDiff, historyIncomplete)
 	}
 
