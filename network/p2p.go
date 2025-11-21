@@ -34,6 +34,8 @@ type P2P struct {
 	blockChan chan *Block
 	txChan    chan *Transaction
 	mu        sync.RWMutex
+	// Whitelist of allowed peer IPs (without port)
+	allowedIPs map[string]bool
 	// Callback functions for blockchain integration
 	onBlockReceived       func(*Block) error
 	onTransactionReceived func(*Transaction) error
@@ -100,12 +102,41 @@ type Message struct {
 
 // NewP2P creates a new P2P network manager
 func NewP2P(config *P2PConfig) *P2P {
+	// Build whitelist from seed nodes
+	allowedIPs := make(map[string]bool)
+	for _, seedNode := range config.SeedNodes {
+		// Extract IP from "IP:PORT" format
+		if host, _, err := net.SplitHostPort(seedNode); err == nil {
+			allowedIPs[host] = true
+		} else {
+			// If no port, use as-is
+			allowedIPs[seedNode] = true
+		}
+	}
+
 	return &P2P{
-		config:    config,
-		peers:     make(map[string]*Peer),
-		stopChan:  make(chan struct{}),
-		blockChan: make(chan *Block, 1000), // Increased from 100 to 1000 to prevent "Block channel full" errors
-		txChan:    make(chan *Transaction, 1000),
+		config:     config,
+		peers:      make(map[string]*Peer),
+		stopChan:   make(chan struct{}),
+		blockChan:  make(chan *Block, 1000), // Increased from 100 to 1000 to prevent "Block channel full" errors
+		txChan:     make(chan *Transaction, 1000),
+		allowedIPs: allowedIPs,
+	}
+}
+
+// SetAllowedIPs sets the whitelist of allowed peer IPs
+func (p *P2P) SetAllowedIPs(ips []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	
+	p.allowedIPs = make(map[string]bool)
+	for _, ip := range ips {
+		// Extract IP from "IP:PORT" format if needed
+		if host, _, err := net.SplitHostPort(ip); err == nil {
+			p.allowedIPs[host] = true
+		} else {
+			p.allowedIPs[ip] = true
+		}
 	}
 }
 
@@ -303,10 +334,31 @@ func (p *P2P) acceptConnections() {
 func (p *P2P) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
+	// Extract IP from remote address
+	remoteAddr := conn.RemoteAddr().String()
+	remoteIP, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		log.Printf("Failed to parse remote address %s: %v", remoteAddr, err)
+		return
+	}
+
+	// Check if IP is in whitelist (if whitelist is enabled)
+	p.mu.RLock()
+	allowedIPs := p.allowedIPs
+	p.mu.RUnlock()
+
+	// Only check whitelist if it's not empty (empty = allow all)
+	if len(allowedIPs) > 0 {
+		if !allowedIPs[remoteIP] {
+			log.Printf("Rejected incoming connection from non-whitelisted IP: %s", remoteIP)
+			return
+		}
+	}
+
 	// Create peer
 	peer := &Peer{
-		ID:        conn.RemoteAddr().String(),
-		Address:   conn.RemoteAddr().String(),
+		ID:        remoteAddr,
+		Address:   remoteAddr,
 		Conn:      conn,
 		LastSeen:  time.Now(),
 		Connected: true,

@@ -194,6 +194,15 @@ func (n *NodeV2) Start() error {
 		KeepAlive:    60 * time.Second,
 	}
 	n.p2p = network.NewP2P(p2pConfig)
+	
+	// Set allowed IPs from seed nodes (whitelist for incoming connections)
+	// This ensures only approved seed nodes can connect
+	allowedIPs := make([]string, 0)
+	for _, seedNode := range seedNodes {
+		allowedIPs = append(allowedIPs, seedNode)
+	}
+	n.p2p.SetAllowedIPs(allowedIPs)
+	core.LogInfo("P2P whitelist enabled: %d approved seed nodes", len(allowedIPs))
 
 	// Create RPC server
 	n.rpcServer = rpc.NewServerV2(n.config.RPCAddr, n.blockchain)
