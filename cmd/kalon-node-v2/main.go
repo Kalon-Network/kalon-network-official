@@ -194,7 +194,7 @@ func (n *NodeV2) Start() error {
 		KeepAlive:    60 * time.Second,
 	}
 	n.p2p = network.NewP2P(p2pConfig)
-	
+
 	// Set allowed IPs from seed nodes (whitelist for incoming connections)
 	// This ensures only approved seed nodes can connect
 	allowedIPs := make([]string, 0)
@@ -420,12 +420,18 @@ func (n *NodeV2) setupP2PIntegration() {
 		if err := n.blockchain.AddBlockV2(coreBlock); err != nil {
 			// Don't log error if block already exists (common case)
 			if err.Error() != "block already exists" {
-				core.LogWarn("Failed to add block #%d from peer: %v", coreBlock.Header.Number, err)
+				// Check if it's a parent block issue
+				if strings.Contains(err.Error(), "parent") || strings.Contains(err.Error(), "Parent") {
+					core.LogWarn("Failed to add block #%d: %v (may need earlier blocks first)", coreBlock.Header.Number, err)
+				} else {
+					core.LogWarn("Failed to add block #%d from peer: %v", coreBlock.Header.Number, err)
+				}
 			}
 			return err
 		}
 
-		core.LogInfo("✅ Added block #%d from peer (height now: %d)", coreBlock.Header.Number, n.blockchain.GetHeight())
+		newHeight := n.blockchain.GetHeight()
+		core.LogInfo("✅ Added block #%d from peer (height now: %d)", coreBlock.Header.Number, newHeight)
 		return nil
 	})
 
