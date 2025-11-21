@@ -247,6 +247,27 @@ func (p *P2P) BroadcastTransaction(tx *Transaction) error {
 	return p.broadcastMessage(message)
 }
 
+// RequestBlocks requests blocks from a specific peer
+func (p *P2P) RequestBlocks(peerID string, startHeight uint64, endHeight uint64) error {
+	p.peerMutex.RLock()
+	peer, exists := p.peers[peerID]
+	p.peerMutex.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("peer %s not found", peerID)
+	}
+
+	message := &Message{
+		Type:    "get_blocks",
+		Data:    map[string]interface{}{"startHeight": startHeight, "endHeight": endHeight},
+		Version: "1.0",
+		Time:    time.Now(),
+	}
+
+	log.Printf("Requesting blocks %d-%d from peer %s", startHeight, endHeight, peerID)
+	return p.sendMessage(peer, message)
+}
+
 // GetBlockChannel returns the block channel
 func (p *P2P) GetBlockChannel() <-chan *Block {
 	return p.blockChan

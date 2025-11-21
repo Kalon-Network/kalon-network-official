@@ -226,6 +226,9 @@ func (n *NodeV2) Start() error {
 	// Setup P2P integration with blockchain
 	n.setupP2PIntegration()
 
+	// Start block synchronization routine
+	go n.syncBlocks()
+
 	// Wait a moment for server to start
 	time.Sleep(1 * time.Second)
 
@@ -473,4 +476,46 @@ func (n *NodeV2) setupP2PIntegration() {
 	})
 
 	core.LogInfo("P2P integration with blockchain setup completed")
+}
+
+// syncBlocks periodically checks if the node needs to sync blocks from peers
+func (n *NodeV2) syncBlocks() {
+	ticker := time.NewTicker(10 * time.Second) // Check every 10 seconds
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if !n.running {
+				return
+			}
+
+			currentHeight := n.blockchain.GetHeight()
+			peers := n.p2p.GetPeers()
+
+			if len(peers) == 0 {
+				continue
+			}
+
+			// Find a peer with higher block height
+			// For now, request blocks from any peer (we'll improve this later)
+			// Since we don't know peer height, we'll request blocks starting from current height + 1
+			for _, peer := range peers {
+				peerID := peer.ID
+				
+				// Request blocks in batches of 100, starting from current height + 1
+				// We'll request up to 100 blocks at a time
+				startHeight := currentHeight + 1
+				endHeight := startHeight + 99
+
+				core.LogInfo("Syncing blocks %d-%d from peer %s (current height: %d)",
+					startHeight, endHeight, peerID, currentHeight)
+
+				if err := n.p2p.RequestBlocks(peerID, startHeight, endHeight); err != nil {
+					core.LogWarn("Failed to request blocks from peer %s: %v", peerID, err)
+				}
+				break // Only sync from one peer at a time
+			}
+		}
+	}
 }
