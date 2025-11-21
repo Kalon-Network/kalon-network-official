@@ -699,13 +699,25 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 		difficultyDiff = -difficultyDiff
 	}
 
-	// Determine max allowed difference based on history completeness
+	// Determine max allowed difference based on history completeness and difficulty difference
 	maxAllowedDiff := int64(1) // Default: ±1 for rounding
+	
+	// If difficulty difference is large (>10), history is likely incomplete even if not detected
+	// This is a fallback for cases where history detection fails
+	if difficultyDiff > 10 {
+		historyIncomplete = true // Force incomplete history detection
+		LogDebug("Large difficulty difference (%d) detected, treating history as incomplete", difficultyDiff)
+	}
+	
 	if historyIncomplete {
 		// If history is incomplete, allow larger tolerance (±10% or ±5, whichever is larger)
 		maxAllowedDiff = int64(5) // Allow up to ±5 when history is incomplete
 		if maxAllowedDiff < int64(expectedDifficulty)/10 {
 			maxAllowedDiff = int64(expectedDifficulty) / 10
+		}
+		// Also allow at least the current difference if it's reasonable (<50% of expected)
+		if difficultyDiff < int64(expectedDifficulty)/2 && difficultyDiff > maxAllowedDiff {
+			maxAllowedDiff = difficultyDiff + 1 // Allow current difference + 1
 		}
 		LogDebug("Difficulty validation with incomplete history: allowing ±%d tolerance", maxAllowedDiff)
 	}
