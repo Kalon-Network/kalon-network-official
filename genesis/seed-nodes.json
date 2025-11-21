@@ -1,0 +1,7 @@
+{
+  "licensedSeedNodes": [],
+  "version": "1.0",
+  "lastUpdated": "2025-11-20T00:00:00Z",
+  "note": "This file contains licensed seed nodes. It is loaded in addition to genesis/testnet.json seed nodes."
+}
+

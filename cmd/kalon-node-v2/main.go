@@ -132,7 +132,7 @@ func (n *NodeV2) Start() error {
 	}
 	core.LogInfo("Blockchain initialized with height: %d", n.blockchain.GetHeight())
 
-	// Combine seed nodes from genesis and command line
+	// Combine seed nodes from genesis, seed-nodes.json, and command line
 	seedNodes := make([]string, 0)
 	seedNodeMap := make(map[string]bool) // Use map to avoid duplicates
 
@@ -140,6 +140,19 @@ func (n *NodeV2) Start() error {
 	if len(genesis.SeedNodes) > 0 {
 		core.LogInfo("Found %d seed nodes in genesis configuration", len(genesis.SeedNodes))
 		for _, seedNode := range genesis.SeedNodes {
+			seedNode = strings.TrimSpace(seedNode)
+			if seedNode != "" && !seedNodeMap[seedNode] {
+				seedNodes = append(seedNodes, seedNode)
+				seedNodeMap[seedNode] = true
+			}
+		}
+	}
+
+	// Add seed nodes from seed-nodes.json (licensed seed nodes)
+	licensedSeeds := n.loadLicensedSeedNodes()
+	if len(licensedSeeds) > 0 {
+		core.LogInfo("Found %d licensed seed nodes", len(licensedSeeds))
+		for _, seedNode := range licensedSeeds {
 			seedNode = strings.TrimSpace(seedNode)
 			if seedNode != "" && !seedNodeMap[seedNode] {
 				seedNodes = append(seedNodes, seedNode)
@@ -312,6 +325,52 @@ func (n *NodeV2) loadGenesis() (*core.GenesisConfig, error) {
 
 	core.LogInfo("Loaded genesis from %s", n.config.Genesis)
 	return &genesis, nil
+}
+
+// loadLicensedSeedNodes loads licensed seed nodes from seed-nodes.json
+func (n *NodeV2) loadLicensedSeedNodes() []string {
+	// Try to load from genesis directory first, then from data directory
+	seedNodesFile := "genesis/seed-nodes.json"
+	if _, err := os.Stat(seedNodesFile); os.IsNotExist(err) {
+		// Try data directory
+		dataSeedNodesFile := n.config.DataDir + "/seed-nodes.json"
+		if _, err := os.Stat(dataSeedNodesFile); err == nil {
+			seedNodesFile = dataSeedNodesFile
+		} else {
+			// File doesn't exist, return empty list
+			return []string{}
+		}
+	}
+
+	data, err := os.ReadFile(seedNodesFile)
+	if err != nil {
+		core.LogDebug("Could not read seed-nodes.json: %v (this is normal if file doesn't exist)", err)
+		return []string{}
+	}
+
+	var seedNodesConfig struct {
+		LicensedSeedNodes []struct {
+			IP            string `json:"ip"`
+			LicenseTxHash string `json:"licenseTxHash"`
+			LicenseDate   string `json:"licenseDate"`
+			Status        string `json:"status"`
+		} `json:"licensedSeedNodes"`
+	}
+
+	if err := json.Unmarshal(data, &seedNodesConfig); err != nil {
+		core.LogWarn("Failed to parse seed-nodes.json: %v", err)
+		return []string{}
+	}
+
+	// Extract only active seed nodes
+	activeSeeds := make([]string, 0)
+	for _, seed := range seedNodesConfig.LicensedSeedNodes {
+		if seed.Status == "active" && seed.IP != "" {
+			activeSeeds = append(activeSeeds, seed.IP)
+		}
+	}
+
+	return activeSeeds
 }
 
 // setupP2PIntegration sets up the integration between P2P network and blockchain
