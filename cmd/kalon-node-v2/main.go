@@ -421,8 +421,11 @@ func (n *NodeV2) setupP2PIntegration() {
 			// Don't log error if block already exists (common case)
 			if err.Error() != "block already exists" {
 				// Check if it's a parent block issue
-				if strings.Contains(err.Error(), "parent") || strings.Contains(err.Error(), "Parent") {
+				errStr := err.Error()
+				if strings.Contains(errStr, "parent") || strings.Contains(errStr, "Parent") {
 					core.LogWarn("Failed to add block #%d: %v (may need earlier blocks first)", coreBlock.Header.Number, err)
+				} else if strings.Contains(errStr, "validation") || strings.Contains(errStr, "difficulty") || strings.Contains(errStr, "merkle") {
+					core.LogWarn("Failed to add block #%d: validation error - %v", coreBlock.Header.Number, err)
 				} else {
 					core.LogWarn("Failed to add block #%d from peer: %v", coreBlock.Header.Number, err)
 				}

@@ -594,7 +594,7 @@ func (p *P2P) handleBlocksMessage(peer *Peer, message *Message) {
 	for i := range blocks {
 		blocksWithIndex[i] = blockWithIndex{&blocks[i], i}
 	}
-	
+
 	// Sort by block number (height)
 	for i := 0; i < len(blocksWithIndex)-1; i++ {
 		for j := i + 1; j < len(blocksWithIndex); j++ {
@@ -609,34 +609,54 @@ func (p *P2P) handleBlocksMessage(peer *Peer, message *Message) {
 	handler := p.onBlockReceived
 	p.mu.RUnlock()
 
-	if handler != nil {
-		successCount := 0
-		errorCount := 0
-		parentErrors := 0
-		
-		for _, item := range blocksWithIndex {
-			block := item.block
-			if err := handler(block); err != nil {
-				// Log error but continue processing other blocks
-				log.Printf("Failed to process block %d (height %d) from peer: %v", item.index, block.Header.Number, err)
-				errorCount++
-				// If parent block not found, we need to request earlier blocks first
-				if strings.Contains(err.Error(), "parent") || strings.Contains(err.Error(), "Parent") {
-					parentErrors++
-					log.Printf("Parent block missing for block %d - may need to sync from earlier height", block.Header.Number)
+		if handler != nil {
+			successCount := 0
+			errorCount := 0
+			parentErrors := 0
+			alreadyExistsCount := 0
+			validationErrors := 0
+			
+			for _, item := range blocksWithIndex {
+				block := item.block
+				if err := handler(block); err != nil {
+					// Check error type
+					errStr := err.Error()
+					if errStr == "block already exists" {
+						alreadyExistsCount++
+						// Don't count as error - block is already in chain
+						successCount++
+						continue
+					}
+					
+					// Log error but continue processing other blocks
+					log.Printf("Failed to process block %d (height %d) from peer: %v", item.index, block.Header.Number, err)
+					errorCount++
+					
+					// If parent block not found, we need to request earlier blocks first
+					if strings.Contains(errStr, "parent") || strings.Contains(errStr, "Parent") {
+						parentErrors++
+						log.Printf("Parent block missing for block %d - may need to sync from earlier height", block.Header.Number)
+					} else if strings.Contains(errStr, "validation") || strings.Contains(errStr, "difficulty") || strings.Contains(errStr, "merkle") {
+						validationErrors++
+						log.Printf("Validation error for block %d: %v", block.Header.Number, err)
+					}
+				} else {
+					successCount++
 				}
-			} else {
-				successCount++
 			}
-		}
-		
-		log.Printf("Processed %d blocks from peer %s: %d successful, %d failed (%d parent errors)", 
-			len(blocks), peer.ID, successCount, errorCount, parentErrors)
-		
-		// If all blocks failed due to parent errors, we need to sync from earlier height
-		if parentErrors > 0 && successCount == 0 && errorCount == parentErrors {
-			log.Printf("⚠️ All blocks failed due to missing parents - may need to sync from block 1")
-		}
+
+			log.Printf("Processed %d blocks from peer %s: %d successful (%d already existed), %d failed (%d parent errors, %d validation errors)", 
+				len(blocks), peer.ID, successCount, alreadyExistsCount, errorCount, parentErrors, validationErrors)
+			
+			// If all blocks failed due to parent errors, we need to sync from earlier height
+			if parentErrors > 0 && successCount == 0 && errorCount == parentErrors {
+				log.Printf("⚠️ All blocks failed due to missing parents - may need to sync from block 1")
+			}
+			
+			// If all blocks failed due to validation errors, there might be a chain mismatch
+			if validationErrors > 0 && successCount == 0 && errorCount == validationErrors {
+				log.Printf("⚠️ All blocks failed validation - possible chain/genesis mismatch")
+			}
 	}
 }
 
