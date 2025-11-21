@@ -55,7 +55,8 @@ ExecStart=$(pwd)/build/kalon-node-v2 \\
     -datadir $(pwd)/data/testnet \\
     -genesis $(pwd)/genesis/testnet.json \\
     -rpc 127.0.0.1:16316 \\
-    -p2p 0.0.0.0:17335
+    -p2p 0.0.0.0:17335 \\
+    -seednodes 185.133.249.107:17335
 Restart=always
 RestartSec=10
 StandardOutput=append:$(pwd)/logs/node.log
@@ -98,4 +99,5 @@ echo "=========================================="
 echo "Your seed node IP should be: $(curl -s ifconfig.me 2>/dev/null || echo 'YOUR_IP'):17335"
 echo "Make sure this IP is added to seed-nodes.json on the master server!"
 echo "=========================================="
+
 
