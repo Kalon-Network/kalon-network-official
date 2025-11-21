@@ -427,7 +427,7 @@ func (n *NodeV2) setupP2PIntegration() {
 					// Get current best block to check parent hash
 					bestBlock := n.blockchain.GetBestBlock()
 					if bestBlock != nil {
-						core.LogWarn("Failed to add block #%d: %v (current best block: #%d, hash: %x, expected parent: %x)", 
+						core.LogWarn("Failed to add block #%d: %v (current best block: #%d, hash: %x, expected parent: %x)",
 							coreBlock.Header.Number, err, bestBlock.Header.Number, bestBlock.Hash, coreBlock.Header.ParentHash)
 					} else {
 						core.LogWarn("Failed to add block #%d: %v (may need earlier blocks first)", coreBlock.Header.Number, err)
@@ -554,16 +554,17 @@ func (n *NodeV2) syncBlocks() {
 			for _, peer := range peers {
 				peerID := peer.ID
 
-				// CRITICAL: If parent hash mismatch, we need to re-sync from earlier blocks
-				// Request blocks starting from current height (not +1) to ensure parent chain is correct
+				// CRITICAL: If we're getting parent errors, we have a chain mismatch
+				// We need to re-sync from block 1 to ensure correct chain
 				var startHeight uint64
 				
-				// If we're at a low height and getting parent errors, sync from current height
-				// This ensures we have the correct parent chain
+				// If we're at low height (< 200) and getting parent errors, force full re-sync from block 1
+				// This ensures we have the correct chain matching the master node
 				if currentHeight < 200 {
-					// Start from current height to verify parent chain
-					startHeight = currentHeight
-					core.LogInfo("🔄 Syncing from block %d to verify parent chain (current height: %d)", startHeight, currentHeight)
+					// Force full sync from block 1 to fix chain mismatch
+					startHeight = 1
+					core.LogWarn("⚠️ Chain mismatch detected (height: %d) - forcing full re-sync from block 1", currentHeight)
+					core.LogInfo("🔄 Starting full chain re-sync from block 1 to fix parent hash mismatches")
 				} else {
 					// Normal sync: request blocks starting from current height + 1
 					startHeight = currentHeight + 1
@@ -572,9 +573,9 @@ func (n *NodeV2) syncBlocks() {
 				// Request blocks in batches of 100
 				endHeight := startHeight + 99
 
-				// Only request if we're behind (but allow re-verifying current block)
-				if startHeight > currentHeight+1 {
-					// Too far ahead, skip
+				// Only request if we're behind (but allow re-syncing from block 1)
+				if startHeight > currentHeight+1 && currentHeight >= 200 {
+					// Too far ahead, skip (but allow re-sync from block 1)
 					continue
 				}
 
