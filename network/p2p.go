@@ -671,6 +671,12 @@ func (p *P2P) handleBlocksMessage(peer *Peer, message *Message) {
 		// If most blocks failed due to parent errors (>50%), likely chain mismatch
 		if parentErrors > 50 && float64(parentErrors)/float64(len(blocks)) > 0.5 {
 			log.Printf("⚠️ WARNING: >50%% blocks failed due to parent errors - possible chain mismatch")
+			log.Printf("⚠️ Suggestion: Delete chaindb and re-sync from block 1")
+		}
+		
+		// If we got some blocks but many failed, log summary
+		if parentErrors > 0 && successCount > 0 {
+			log.Printf("⚠️ Partial success: %d blocks added, %d failed due to parent errors", successCount, parentErrors)
 		}
 
 		// If all blocks failed due to validation errors, there might be a chain mismatch
