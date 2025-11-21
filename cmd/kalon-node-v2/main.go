@@ -547,14 +547,19 @@ func (n *NodeV2) syncBlocks() {
 			for _, peer := range peers {
 				peerID := peer.ID
 
-				// CRITICAL: If we're very far behind or stuck at low height, sync from block 1
+				// CRITICAL: If we're stuck at low height, sync from block 1
 				// This ensures we have all parent blocks in correct order
 				var startHeight uint64
 				if currentHeight < 200 {
-					// If we're below block 200, start from block 1 to ensure complete chain
-					// This fixes the issue where seed node gets stuck requesting blocks that can't be added
-					startHeight = 1
-					core.LogInfo("🔄 Starting full sync from block 1 (current height: %d, ensuring complete chain)", currentHeight)
+					// If we're below block 200, start from current height + 1 (not from 1)
+					// Only sync from 1 if we're at genesis (height 0 or 1)
+					if currentHeight <= 1 {
+						startHeight = 1
+						core.LogInfo("🔄 Starting full sync from block 1 (current height: %d)", currentHeight)
+					} else {
+						// Continue from where we are
+						startHeight = currentHeight + 1
+					}
 				} else {
 					// Normal sync: request blocks starting from current height + 1
 					startHeight = currentHeight + 1
@@ -563,9 +568,9 @@ func (n *NodeV2) syncBlocks() {
 				// Request blocks in batches of 100
 				endHeight := startHeight + 99
 
-				// Only request if we're behind (but allow re-syncing from block 1 if height < 200)
-				if startHeight <= currentHeight && currentHeight >= 200 {
-					// Already have these blocks, skip (but only if we're past block 200)
+				// Only request if we're behind
+				if startHeight <= currentHeight {
+					// Already have these blocks, skip
 					continue
 				}
 

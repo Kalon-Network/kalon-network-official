@@ -609,22 +609,23 @@ func (p *P2P) handleBlocksMessage(peer *Peer, message *Message) {
 	handler := p.onBlockReceived
 	p.mu.RUnlock()
 
-		if handler != nil {
-			successCount := 0
-			errorCount := 0
-			parentErrors := 0
-			alreadyExistsCount := 0
-			validationErrors := 0
-			
+	if handler != nil {
+		successCount := 0
+		errorCount := 0
+		parentErrors := 0
+		alreadyExistsCount := 0
+		validationErrors := 0
+
 			for _, item := range blocksWithIndex {
 				block := item.block
 				if err := handler(block); err != nil {
 					// Check error type
 					errStr := err.Error()
 					if errStr == "block already exists" {
+						// Block already exists - this is success, not an error
 						alreadyExistsCount++
-						// Don't count as error - block is already in chain
 						successCount++
+						// Don't log this as an error
 						continue
 					}
 					
@@ -645,18 +646,30 @@ func (p *P2P) handleBlocksMessage(peer *Peer, message *Message) {
 				}
 			}
 
-			log.Printf("Processed %d blocks from peer %s: %d successful (%d already existed), %d failed (%d parent errors, %d validation errors)", 
-				len(blocks), peer.ID, successCount, alreadyExistsCount, errorCount, parentErrors, validationErrors)
+			// Calculate actual new blocks added (excluding already existing ones)
+			newBlocksAdded := successCount - alreadyExistsCount
 			
-			// If all blocks failed due to parent errors, we need to sync from earlier height
-			if parentErrors > 0 && successCount == 0 && errorCount == parentErrors {
-				log.Printf("⚠️ All blocks failed due to missing parents - may need to sync from block 1")
+			if newBlocksAdded > 0 {
+				log.Printf("✅ Processed %d blocks from peer %s: %d new blocks added, %d already existed, %d failed (%d parent errors, %d validation errors)", 
+					len(blocks), peer.ID, newBlocksAdded, alreadyExistsCount, errorCount, parentErrors, validationErrors)
+			} else if alreadyExistsCount > 0 {
+				// All blocks already exist - this is normal during re-sync
+				log.Printf("ℹ️  Processed %d blocks from peer %s: all %d blocks already exist (chain is up to date)", 
+					len(blocks), peer.ID, alreadyExistsCount)
+			} else {
+				log.Printf("❌ Processed %d blocks from peer %s: %d successful, %d failed (%d parent errors, %d validation errors)", 
+					len(blocks), peer.ID, successCount, errorCount, parentErrors, validationErrors)
 			}
-			
-			// If all blocks failed due to validation errors, there might be a chain mismatch
-			if validationErrors > 0 && successCount == 0 && errorCount == validationErrors {
-				log.Printf("⚠️ All blocks failed validation - possible chain/genesis mismatch")
-			}
+
+		// If all blocks failed due to parent errors, we need to sync from earlier height
+		if parentErrors > 0 && successCount == 0 && errorCount == parentErrors {
+			log.Printf("⚠️ All blocks failed due to missing parents - may need to sync from block 1")
+		}
+
+		// If all blocks failed due to validation errors, there might be a chain mismatch
+		if validationErrors > 0 && successCount == 0 && errorCount == validationErrors {
+			log.Printf("⚠️ All blocks failed validation - possible chain/genesis mismatch")
+		}
 	}
 }
 
