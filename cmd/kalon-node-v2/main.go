@@ -433,6 +433,8 @@ func (n *NodeV2) setupP2PIntegration() {
 						if coreBlock.Header.Number == bestBlock.Header.Number+1 {
 							// This is the next block, but parent hash doesn't match
 							// This means bestBlock has wrong hash - we need to re-sync
+							// Increment consecutive parent error counter (used by syncBlocks routine)
+							// Note: This is a global counter, but we'll track it per-block in syncBlocks
 							core.LogWarn("⚠️ CRITICAL: Parent hash mismatch for block #%d!", coreBlock.Header.Number)
 							core.LogWarn("⚠️ Local best block #%d hash: %x", bestBlock.Header.Number, bestBlock.Hash)
 							core.LogWarn("⚠️ Peer block #%d expects parent hash: %x", coreBlock.Header.Number, coreBlock.Header.ParentHash)
@@ -551,6 +553,11 @@ func (n *NodeV2) syncBlocks() {
 	ticker := time.NewTicker(10 * time.Second) // Check every 10 seconds
 	defer ticker.Stop()
 
+	// Track sync state to detect chain mismatches
+	var lastHeight uint64
+	var lastHeightTime time.Time
+	var consecutiveStuckCycles int
+
 	for {
 		select {
 		case <-ticker.C:
@@ -565,6 +572,31 @@ func (n *NodeV2) syncBlocks() {
 				continue
 			}
 
+			// Detect if we're stuck (same height for 30+ seconds)
+			now := time.Now()
+			if currentHeight == lastHeight && currentHeight > 0 {
+				if lastHeightTime.IsZero() {
+					lastHeightTime = now
+				} else if now.Sub(lastHeightTime) > 30*time.Second {
+					consecutiveStuckCycles++
+					if consecutiveStuckCycles >= 3 {
+						// We're stuck for 90+ seconds - likely chain mismatch
+						core.LogWarn("⚠️ CRITICAL: Node stuck at height %d for %v - likely chain mismatch!", 
+							currentHeight, now.Sub(lastHeightTime))
+						core.LogWarn("⚠️ Solution: Delete chaindb and re-sync from block 1")
+						core.LogWarn("⚠️ Command: rm -rf data/testnet/chaindb && sudo systemctl restart kalon-seed-node")
+						// Reset to avoid spam, but keep warning
+						consecutiveStuckCycles = 0
+						lastHeightTime = now
+					}
+				}
+			} else {
+				// Height changed, reset tracking
+				lastHeight = currentHeight
+				lastHeightTime = time.Time{} // Reset
+				consecutiveStuckCycles = 0
+			}
+
 			// Find a peer with higher block height
 			// For now, request blocks from any peer (we'll improve this later)
 			// Since we don't know peer height, we'll request blocks starting from current height + 1
@@ -573,7 +605,7 @@ func (n *NodeV2) syncBlocks() {
 
 				// CRITICAL: Smart sync strategy
 				// Normal case: sync from currentHeight + 1
-				// Only sync from block 1 if we're very early (< 10) or if we detect chain issues
+				// Only sync from block 1 if we're very early (< 10)
 				var startHeight uint64
 
 				if currentHeight < 10 {
