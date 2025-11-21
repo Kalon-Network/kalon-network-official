@@ -427,8 +427,16 @@ func (n *NodeV2) setupP2PIntegration() {
 					// Get current best block to check parent hash
 					bestBlock := n.blockchain.GetBestBlock()
 					if bestBlock != nil {
-						core.LogWarn("Failed to add block #%d: %v (current best block: #%d, hash: %x, expected parent: %x)",
-							coreBlock.Header.Number, err, bestBlock.Header.Number, bestBlock.Hash, coreBlock.Header.ParentHash)
+						// Check if this is a hash mismatch (different block at same height)
+						if coreBlock.Header.Number == bestBlock.Header.Number && coreBlock.Hash != bestBlock.Hash {
+							core.LogWarn("⚠️ Chain mismatch detected! Block #%d: local hash=%x, peer hash=%x (parent mismatch)",
+								coreBlock.Header.Number, bestBlock.Hash, coreBlock.Hash)
+							core.LogWarn("⚠️ Local block #%d hash: %x, Peer block #%d expects parent: %x",
+								bestBlock.Header.Number, bestBlock.Hash, coreBlock.Header.Number, coreBlock.Header.ParentHash)
+						} else {
+							core.LogWarn("Failed to add block #%d: %v (current best block: #%d, hash: %x, expected parent: %x)",
+								coreBlock.Header.Number, err, bestBlock.Header.Number, bestBlock.Hash, coreBlock.Header.ParentHash)
+						}
 					} else {
 						core.LogWarn("Failed to add block #%d: %v (may need earlier blocks first)", coreBlock.Header.Number, err)
 					}
@@ -554,17 +562,17 @@ func (n *NodeV2) syncBlocks() {
 			for _, peer := range peers {
 				peerID := peer.ID
 
-				// CRITICAL: Smart sync strategy with parent verification
-				// If we're stuck (can't add next block), verify current block and sync from there
+				// CRITICAL: Smart sync strategy
+				// If we're stuck at low height, we need to ensure we have the correct chain
 				var startHeight uint64
 				
-				// Check if we're stuck - if we've been at same height for a while and getting parent errors
-				// In that case, re-verify the current block by syncing from currentHeight (not +1)
+				// If we're at a low height (< 200), sync from block 1 to ensure complete correct chain
+				// This fixes chain mismatches where blocks have wrong parent hashes
 				if currentHeight < 200 {
-					// For low heights, always sync from currentHeight to verify parent chain
-					// This ensures we have the correct block before trying to add the next one
-					startHeight = currentHeight
-					core.LogInfo("🔄 Syncing from block %d to verify parent chain (current height: %d)", startHeight, currentHeight)
+					// Force full re-sync from block 1 to ensure correct chain
+					// This is necessary when parent hashes don't match
+					startHeight = 1
+					core.LogInfo("🔄 Re-syncing from block 1 to fix chain (current height: %d)", currentHeight)
 				} else {
 					// Normal sync: request blocks starting from current height + 1
 					startHeight = currentHeight + 1
@@ -573,9 +581,9 @@ func (n *NodeV2) syncBlocks() {
 				// Request blocks in batches of 100
 				endHeight := startHeight + 99
 
-				// Only request if we're behind (but allow re-verifying current block)
-				if startHeight > currentHeight+1 {
-					// Too far ahead, skip
+				// Only request if we're behind (but always allow re-syncing from block 1)
+				if startHeight > currentHeight+1 && currentHeight >= 200 {
+					// Too far ahead, skip (but allow re-sync from block 1)
 					continue
 				}
 
