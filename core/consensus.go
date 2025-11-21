@@ -173,7 +173,14 @@ func (cm *ConsensusManager) ValidateProofOfWork(block *Block) bool {
 }
 
 // CalculateDifficulty calculates the difficulty for the next block using LWMA
+// Uses current time (for mining new blocks)
 func (cm *ConsensusManager) CalculateDifficulty(height uint64, parent *Block, blockHistory []time.Time) uint64 {
+	return cm.CalculateDifficultyWithTimestamp(height, parent, blockHistory, time.Now())
+}
+
+// CalculateDifficultyWithTimestamp calculates the difficulty using a specific timestamp
+// This is used for validation to ensure consistent difficulty regardless of when block is received
+func (cm *ConsensusManager) CalculateDifficultyWithTimestamp(height uint64, parent *Block, blockHistory []time.Time, blockTimestamp time.Time) uint64 {
 	if height == 0 {
 		return cm.genesis.Difficulty.InitialDifficulty // Initial difficulty
 	}
@@ -217,7 +224,8 @@ func (cm *ConsensusManager) CalculateDifficulty(height uint64, parent *Block, bl
 	// IMPORTANT: Include time since last block in LWMA calculation
 	// This ensures difficulty adjusts immediately when blocks are found slowly
 	// Without this, LWMA would only use old fast blocks and difficulty would keep rising
-	currentTime := time.Now()
+	// Use provided timestamp (block's timestamp for validation, time.Now() for mining)
+	currentTime := blockTimestamp
 	if len(blockHistory) > 0 {
 		lastBlockTime := blockHistory[len(blockHistory)-1]
 		timeSinceLastBlock := currentTime.Sub(lastBlockTime)
