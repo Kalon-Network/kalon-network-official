@@ -638,26 +638,31 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 	// DEBUG: Log difficulty calculation details
 	LogDebug("Difficulty validation for block #%d: parent #%d difficulty=%d, blockHistory len=%d, blockTimestamp=%v",
 		block.Header.Number, parent.Header.Number, parent.Header.Difficulty, len(blockHistory), block.Header.Timestamp)
-	
+
 	// CRITICAL: Check if block history is incomplete (has gaps)
 	// If history is incomplete, difficulty calculation may be inaccurate
 	// In this case, we should be more lenient with difficulty validation
 	historyIncomplete := false
 	
-	// Method 1: Check if we have fewer blocks in history than expected
-	// If we're at block N but only have M blocks in history (where M << N), history is incomplete
-	expectedHistorySize := windowSize
-	if block.Header.Number < uint64(windowSize) {
-		expectedHistorySize = int(block.Header.Number) + 1 // +1 for genesis
-	}
-	if len(blockHistory) < expectedHistorySize/2 {
-		// If we have less than half the expected blocks, history is definitely incomplete
+	// Method 1: Check if current height is much larger than history size
+	// If we're at block 463 but only have 50 blocks in history, many blocks are missing
+	currentHeight := bc.height
+	if currentHeight > 0 && len(blockHistory) < int(currentHeight)/3 {
+		// If we have less than 1/3 of the current height in history, history is incomplete
 		historyIncomplete = true
-		LogDebug("Block history incomplete: have %d blocks, expected ~%d (at block #%d)", 
-			len(blockHistory), expectedHistorySize, block.Header.Number)
+		LogDebug("Block history incomplete: have %d blocks in history, but at height %d (at block #%d)", 
+			len(blockHistory), currentHeight, block.Header.Number)
 	}
 	
-	// Method 2: Check for large gaps in block history timestamps (indicates missing blocks)
+	// Method 2: Check if we have fewer blocks in history than expected window size
+	// If windowSize is 120 but we only have 50 blocks, history is incomplete
+	if !historyIncomplete && len(blockHistory) < windowSize/2 && block.Header.Number >= uint64(windowSize) {
+		historyIncomplete = true
+		LogDebug("Block history incomplete: have %d blocks, expected ~%d (at block #%d)", 
+			len(blockHistory), windowSize, block.Header.Number)
+	}
+	
+	// Method 3: Check for large gaps in block history timestamps (indicates missing blocks)
 	if !historyIncomplete && len(blockHistory) > 1 {
 		// Check for large gaps in block history (indicates missing blocks)
 		for i := 1; i < len(blockHistory); i++ {
