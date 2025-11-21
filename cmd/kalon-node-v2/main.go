@@ -420,12 +420,12 @@ func (n *NodeV2) setupP2PIntegration() {
 		if err := n.blockchain.AddBlockV2(coreBlock); err != nil {
 			// Don't log error if block already exists (common case)
 			if err.Error() != "block already exists" {
-				core.LogWarn("Failed to add block from peer: %v", err)
+				core.LogWarn("Failed to add block #%d from peer: %v", coreBlock.Header.Number, err)
 			}
 			return err
 		}
 
-		core.LogDebug("Received and added block #%d from peer", coreBlock.Header.Number)
+		core.LogInfo("✅ Added block #%d from peer (height now: %d)", coreBlock.Header.Number, n.blockchain.GetHeight())
 		return nil
 	})
 
@@ -539,7 +539,13 @@ func (n *NodeV2) syncBlocks() {
 				startHeight := currentHeight + 1
 				endHeight := startHeight + 99
 
-				core.LogInfo("Syncing blocks %d-%d from peer %s (current height: %d)",
+				// Only request if we're behind (currentHeight should increase after blocks are added)
+				if startHeight <= currentHeight {
+					// Already have these blocks, skip
+					continue
+				}
+
+				core.LogInfo("🔄 Syncing blocks %d-%d from peer %s (current height: %d)",
 					startHeight, endHeight, peerID, currentHeight)
 
 				if err := n.p2p.RequestBlocks(peerID, startHeight, endHeight); err != nil {

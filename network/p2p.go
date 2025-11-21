@@ -583,17 +583,28 @@ func (p *P2P) handleBlocksMessage(peer *Peer, message *Message) {
 
 	log.Printf("Received %d blocks from peer %s", len(blocks), peer.ID)
 
-	// Process each block
+	// Process each block sequentially (important for blockchain integrity)
 	p.mu.RLock()
 	handler := p.onBlockReceived
 	p.mu.RUnlock()
 
 	if handler != nil {
+		successCount := 0
+		errorCount := 0
 		for i := range blocks {
 			if err := handler(&blocks[i]); err != nil {
-				log.Printf("Failed to process block %d from peer: %v", i, err)
+				// Log error but continue processing other blocks
+				log.Printf("Failed to process block %d (height %d) from peer: %v", i, blocks[i].Header.Number, err)
+				errorCount++
+				// If parent block not found, we need to request earlier blocks first
+				if strings.Contains(err.Error(), "parent") || strings.Contains(err.Error(), "Parent") {
+					log.Printf("Parent block missing for block %d - may need to sync from earlier height", blocks[i].Header.Number)
+				}
+			} else {
+				successCount++
 			}
 		}
+		log.Printf("Processed %d blocks from peer %s: %d successful, %d failed", len(blocks), peer.ID, successCount, errorCount)
 	}
 }
 
