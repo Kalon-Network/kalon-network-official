@@ -638,8 +638,26 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 	// DEBUG: Log difficulty calculation details
 	LogDebug("Difficulty validation for block #%d: parent #%d difficulty=%d, blockHistory len=%d, blockTimestamp=%v",
 		block.Header.Number, parent.Header.Number, parent.Header.Difficulty, len(blockHistory), block.Header.Timestamp)
+	
+	// CRITICAL: Check if block history is incomplete (has gaps)
+	// If history is incomplete, difficulty calculation may be inaccurate
+	// In this case, we should be more lenient with difficulty validation
+	historyIncomplete := false
+	if len(blockHistory) > 1 {
+		// Check for large gaps in block history (indicates missing blocks)
+		for i := 1; i < len(blockHistory); i++ {
+			timeDiff := blockHistory[i].Sub(blockHistory[i-1])
+			// If gap is > 5x target block time, likely missing blocks
+			if timeDiff > time.Duration(bc.genesis.BlockTimeTarget)*5*time.Second {
+				historyIncomplete = true
+				LogDebug("Block history has gap: %v between blocks (likely missing blocks)", timeDiff)
+				break
+			}
+		}
+	}
+	
 	expectedDifficulty := consensusManager.CalculateDifficultyWithTimestamp(block.Header.Number, parent, blockHistory, block.Header.Timestamp)
-	LogDebug("Difficulty validation result: expected=%d, block has=%d", expectedDifficulty, block.Header.Difficulty)
+	LogDebug("Difficulty validation result: expected=%d, block has=%d, historyIncomplete=%v", expectedDifficulty, block.Header.Difficulty, historyIncomplete)
 
 	// Allow difficulty to be within MinDifficulty/MaxDifficulty range (due to caps)
 	minDiff := bc.genesis.Difficulty.MinDifficulty
@@ -653,18 +671,33 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 		}
 	}
 
-	// Allow small tolerance (±1) for difficulty due to floating point rounding differences
-	// This can happen when block history is slightly different or timing calculations differ
+	// Allow tolerance for difficulty due to:
+	// 1. Floating point rounding differences (±1)
+	// 2. Incomplete block history (larger tolerance needed)
 	difficultyDiff := int64(block.Header.Difficulty) - int64(expectedDifficulty)
 	if difficultyDiff < 0 {
 		difficultyDiff = -difficultyDiff
 	}
-	if difficultyDiff > 1 {
-		// Only reject if difference is more than 1
-		return fmt.Errorf("invalid difficulty: expected %d, got %d", expectedDifficulty, block.Header.Difficulty)
-	} else if difficultyDiff == 1 {
-		// Log warning but allow (tolerance for rounding differences)
-		LogDebug("Difficulty tolerance: expected %d, got %d (allowing ±1 tolerance)", expectedDifficulty, block.Header.Difficulty)
+	
+	// Determine max allowed difference based on history completeness
+	maxAllowedDiff := int64(1) // Default: ±1 for rounding
+	if historyIncomplete {
+		// If history is incomplete, allow larger tolerance (±10% or ±5, whichever is larger)
+		maxAllowedDiff = int64(5) // Allow up to ±5 when history is incomplete
+		if maxAllowedDiff < int64(expectedDifficulty)/10 {
+			maxAllowedDiff = int64(expectedDifficulty) / 10
+		}
+		LogDebug("Difficulty validation with incomplete history: allowing ±%d tolerance", maxAllowedDiff)
+	}
+	
+	if difficultyDiff > maxAllowedDiff {
+		// Only reject if difference exceeds tolerance
+		return fmt.Errorf("invalid difficulty: expected %d, got %d (diff: %d, max allowed: %d, historyIncomplete: %v)", 
+			expectedDifficulty, block.Header.Difficulty, difficultyDiff, maxAllowedDiff, historyIncomplete)
+	} else if difficultyDiff > 0 {
+		// Log warning but allow (within tolerance)
+		LogDebug("Difficulty tolerance: expected %d, got %d (allowing ±%d tolerance, historyIncomplete: %v)", 
+			expectedDifficulty, block.Header.Difficulty, maxAllowedDiff, historyIncomplete)
 	}
 
 	// Validate merkle root
