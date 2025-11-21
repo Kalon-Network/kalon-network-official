@@ -447,9 +447,17 @@ func (n *NodeV2) setupP2PIntegration() {
 		// Get blocks from blockchain
 		currentHeight := n.blockchain.GetHeight()
 
+		core.LogDebug("get_blocks request: startHeight=%d, endHeight=%d, currentHeight=%d", startHeight, endHeight, currentHeight)
+
 		// Limit end height to current height
 		if endHeight > currentHeight {
 			endHeight = currentHeight
+		}
+
+		// Check if startHeight is valid
+		if startHeight > currentHeight {
+			core.LogDebug("get_blocks: startHeight %d > currentHeight %d, returning empty", startHeight, currentHeight)
+			return []*network.Block{}, nil
 		}
 
 		// Limit range to 100 blocks max
@@ -458,10 +466,19 @@ func (n *NodeV2) setupP2PIntegration() {
 		}
 
 		blocks := make([]*network.Block, 0)
+		successCount := 0
+		errorCount := 0
 		for i := startHeight; i <= endHeight; i++ {
 			// Get block by number
 			block, err := n.blockchain.GetBlockByNumber(i)
-			if err != nil || block == nil {
+			if err != nil {
+				core.LogDebug("get_blocks: Failed to get block %d: %v", i, err)
+				errorCount++
+				continue
+			}
+			if block == nil {
+				core.LogDebug("get_blocks: Block %d is nil", i)
+				errorCount++
 				continue
 			}
 
@@ -469,9 +486,14 @@ func (n *NodeV2) setupP2PIntegration() {
 			networkBlock := network.ConvertCoreBlockToNetworkBlock(block)
 			if networkBlock != nil {
 				blocks = append(blocks, networkBlock)
+				successCount++
+			} else {
+				core.LogDebug("get_blocks: Failed to convert block %d to network block", i)
+				errorCount++
 			}
 		}
 
+		core.LogInfo("get_blocks: Returning %d blocks (success: %d, errors: %d) for range %d-%d", len(blocks), successCount, errorCount, startHeight, endHeight)
 		return blocks, nil
 	})
 
@@ -502,7 +524,7 @@ func (n *NodeV2) syncBlocks() {
 			// Since we don't know peer height, we'll request blocks starting from current height + 1
 			for _, peer := range peers {
 				peerID := peer.ID
-				
+
 				// Request blocks in batches of 100, starting from current height + 1
 				// We'll request up to 100 blocks at a time
 				startHeight := currentHeight + 1
