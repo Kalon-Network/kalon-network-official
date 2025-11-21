@@ -431,7 +431,10 @@ func (n *NodeV2) setupP2PIntegration() {
 		}
 
 		newHeight := n.blockchain.GetHeight()
-		core.LogInfo("✅ Added block #%d from peer (height now: %d)", coreBlock.Header.Number, newHeight)
+		// Only log every 10th block to reduce log spam during full sync
+		if newHeight%10 == 0 || newHeight < 200 {
+			core.LogInfo("✅ Added block #%d from peer (height now: %d)", coreBlock.Header.Number, newHeight)
+		}
 		return nil
 	})
 

@@ -129,7 +129,7 @@ func NewP2P(config *P2PConfig) *P2P {
 func (p *P2P) SetAllowedIPs(ips []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	
+
 	p.allowedIPs = make(map[string]bool)
 	for _, ip := range ips {
 		// Extract IP from "IP:PORT" format if needed
@@ -584,6 +584,26 @@ func (p *P2P) handleBlocksMessage(peer *Peer, message *Message) {
 
 	log.Printf("Received %d blocks from peer %s", len(blocks), peer.ID)
 
+	// CRITICAL: Sort blocks by height to ensure sequential processing
+	// This ensures parent blocks are processed before child blocks
+	type blockWithIndex struct {
+		block *Block
+		index int
+	}
+	blocksWithIndex := make([]blockWithIndex, len(blocks))
+	for i := range blocks {
+		blocksWithIndex[i] = blockWithIndex{&blocks[i], i}
+	}
+	
+	// Sort by block number (height)
+	for i := 0; i < len(blocksWithIndex)-1; i++ {
+		for j := i + 1; j < len(blocksWithIndex); j++ {
+			if blocksWithIndex[i].block.Header.Number > blocksWithIndex[j].block.Header.Number {
+				blocksWithIndex[i], blocksWithIndex[j] = blocksWithIndex[j], blocksWithIndex[i]
+			}
+		}
+	}
+
 	// Process each block sequentially (important for blockchain integrity)
 	p.mu.RLock()
 	handler := p.onBlockReceived
@@ -592,20 +612,31 @@ func (p *P2P) handleBlocksMessage(peer *Peer, message *Message) {
 	if handler != nil {
 		successCount := 0
 		errorCount := 0
-		for i := range blocks {
-			if err := handler(&blocks[i]); err != nil {
+		parentErrors := 0
+		
+		for _, item := range blocksWithIndex {
+			block := item.block
+			if err := handler(block); err != nil {
 				// Log error but continue processing other blocks
-				log.Printf("Failed to process block %d (height %d) from peer: %v", i, blocks[i].Header.Number, err)
+				log.Printf("Failed to process block %d (height %d) from peer: %v", item.index, block.Header.Number, err)
 				errorCount++
 				// If parent block not found, we need to request earlier blocks first
 				if strings.Contains(err.Error(), "parent") || strings.Contains(err.Error(), "Parent") {
-					log.Printf("Parent block missing for block %d - may need to sync from earlier height", blocks[i].Header.Number)
+					parentErrors++
+					log.Printf("Parent block missing for block %d - may need to sync from earlier height", block.Header.Number)
 				}
 			} else {
 				successCount++
 			}
 		}
-		log.Printf("Processed %d blocks from peer %s: %d successful, %d failed", len(blocks), peer.ID, successCount, errorCount)
+		
+		log.Printf("Processed %d blocks from peer %s: %d successful, %d failed (%d parent errors)", 
+			len(blocks), peer.ID, successCount, errorCount, parentErrors)
+		
+		// If all blocks failed due to parent errors, we need to sync from earlier height
+		if parentErrors > 0 && successCount == 0 && errorCount == parentErrors {
+			log.Printf("⚠️ All blocks failed due to missing parents - may need to sync from block 1")
+		}
 	}
 }
 
