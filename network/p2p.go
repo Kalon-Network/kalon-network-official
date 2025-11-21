@@ -104,7 +104,7 @@ func NewP2P(config *P2PConfig) *P2P {
 		config:    config,
 		peers:     make(map[string]*Peer),
 		stopChan:  make(chan struct{}),
-		blockChan: make(chan *Block, 100),
+		blockChan: make(chan *Block, 1000), // Increased from 100 to 1000 to prevent "Block channel full" errors
 		txChan:    make(chan *Transaction, 1000),
 	}
 }
