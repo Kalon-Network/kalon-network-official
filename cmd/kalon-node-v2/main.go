@@ -413,6 +413,7 @@ func (n *NodeV2) setupP2PIntegration() {
 		// Convert network.Block to core.Block
 		coreBlock, err := network.ConvertNetworkBlockToCoreBlock(networkBlock)
 		if err != nil {
+			core.LogWarn("Failed to convert network block (height %d): %v", networkBlock.Header.Number, err)
 			return fmt.Errorf("failed to convert network block: %w", err)
 		}
 
