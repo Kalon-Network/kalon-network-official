@@ -554,17 +554,25 @@ func (n *NodeV2) syncBlocks() {
 			for _, peer := range peers {
 				peerID := peer.ID
 
-				// CRITICAL: If we're getting parent errors, we have a chain mismatch
-				// We need to re-sync from block 1 to ensure correct chain
+				// CRITICAL: Smart sync strategy
+				// - If height < 200: sync from block 1 to ensure complete chain
+				// - If height >= 200: normal sync from currentHeight + 1
+				// - But only sync from block 1 if we're still very low (< 100)
 				var startHeight uint64
 				
-				// If we're at low height (< 200) and getting parent errors, force full re-sync from block 1
-				// This ensures we have the correct chain matching the master node
-				if currentHeight < 200 {
-					// Force full sync from block 1 to fix chain mismatch
+				if currentHeight < 100 {
+					// Still early in sync, continue from block 1 to ensure complete chain
 					startHeight = 1
-					core.LogWarn("⚠️ Chain mismatch detected (height: %d) - forcing full re-sync from block 1", currentHeight)
-					core.LogInfo("🔄 Starting full chain re-sync from block 1 to fix parent hash mismatches")
+					core.LogInfo("🔄 Continuing full sync from block 1 (current height: %d)", currentHeight)
+				} else if currentHeight < 200 {
+					// We have blocks 1-100+, now sync the next batch
+					// Start from current height + 1, but if that's still in first 100, start from 101
+					if currentHeight < 100 {
+						startHeight = currentHeight + 1
+					} else {
+						// We're past block 100, sync next batch
+						startHeight = currentHeight + 1
+					}
 				} else {
 					// Normal sync: request blocks starting from current height + 1
 					startHeight = currentHeight + 1
@@ -573,9 +581,9 @@ func (n *NodeV2) syncBlocks() {
 				// Request blocks in batches of 100
 				endHeight := startHeight + 99
 
-				// Only request if we're behind (but allow re-syncing from block 1)
-				if startHeight > currentHeight+1 && currentHeight >= 200 {
-					// Too far ahead, skip (but allow re-sync from block 1)
+				// Only request if we're behind
+				if startHeight <= currentHeight && currentHeight >= 100 {
+					// Already have these blocks, skip (but allow re-syncing if height < 100)
 					continue
 				}
 
