@@ -427,12 +427,21 @@ func (n *NodeV2) setupP2PIntegration() {
 					// Get current best block to check parent hash
 					bestBlock := n.blockchain.GetBestBlock()
 					if bestBlock != nil {
-						// Check if this is a hash mismatch (different block at same height)
-						if coreBlock.Header.Number == bestBlock.Header.Number && coreBlock.Hash != bestBlock.Hash {
-							core.LogWarn("⚠️ Chain mismatch detected! Block #%d: local hash=%x, peer hash=%x (parent mismatch)",
+						// CRITICAL: Check if parent hash mismatch means we have wrong block
+						// If block.Header.Number == bestBlock.Header.Number + 1, but parent hash doesn't match,
+						// it means bestBlock has wrong hash (chain mismatch)
+						if coreBlock.Header.Number == bestBlock.Header.Number+1 {
+							// This is the next block, but parent hash doesn't match
+							// This means bestBlock has wrong hash - we need to re-sync
+							core.LogWarn("⚠️ CRITICAL: Parent hash mismatch for block #%d!", coreBlock.Header.Number)
+							core.LogWarn("⚠️ Local best block #%d hash: %x", bestBlock.Header.Number, bestBlock.Hash)
+							core.LogWarn("⚠️ Peer block #%d expects parent hash: %x", coreBlock.Header.Number, coreBlock.Header.ParentHash)
+							core.LogWarn("⚠️ This indicates chain mismatch - local block #%d has wrong hash!", bestBlock.Header.Number)
+							core.LogWarn("⚠️ Solution: Delete chaindb and re-sync from block 1")
+						} else if coreBlock.Header.Number == bestBlock.Header.Number && coreBlock.Hash != bestBlock.Hash {
+							// Same height, different hash = fork
+							core.LogWarn("⚠️ Fork detected! Block #%d: local hash=%x, peer hash=%x",
 								coreBlock.Header.Number, bestBlock.Hash, coreBlock.Hash)
-							core.LogWarn("⚠️ Local block #%d hash: %x, Peer block #%d expects parent: %x",
-								bestBlock.Header.Number, bestBlock.Hash, coreBlock.Header.Number, coreBlock.Header.ParentHash)
 						} else {
 							core.LogWarn("Failed to add block #%d: %v (current best block: #%d, hash: %x, expected parent: %x)",
 								coreBlock.Header.Number, err, bestBlock.Header.Number, bestBlock.Hash, coreBlock.Header.ParentHash)
@@ -566,7 +575,7 @@ func (n *NodeV2) syncBlocks() {
 				// Normal case: sync from currentHeight + 1
 				// Only sync from block 1 if we're very early (< 10) or if we detect chain issues
 				var startHeight uint64
-				
+
 				if currentHeight < 10 {
 					// Very early in sync, start from block 1 to ensure complete chain
 					startHeight = 1
