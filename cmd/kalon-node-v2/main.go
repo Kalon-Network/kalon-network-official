@@ -667,12 +667,20 @@ func (n *NodeV2) syncBlocks() {
 
 			// CRITICAL: Log what we're requesting to diagnose "Received 0 blocks" issue
 			// CRITICAL: Check if we're requesting blocks beyond peer's height
-			if startHeight > bestPeerHeight {
-				// We're ahead of the peer or peer hasn't updated height yet
-				// This is normal - we'll check again in the next cycle (10 seconds)
-				core.LogDebug("Requesting blocks %d-%d but peer height is only %d (local: %d) - waiting for peer to catch up or update height", 
+			// BUT: If peer height equals our height, the master might have mined new blocks
+			// We should still try to request, as the peer height might be stale
+			if startHeight > bestPeerHeight && bestPeerHeight < currentHeight {
+				// We're ahead of the peer (shouldn't happen, but handle gracefully)
+				core.LogDebug("Requesting blocks %d-%d but peer height is only %d (local: %d) - peer is behind us", 
 					startHeight, endHeight, bestPeerHeight, currentHeight)
-				continue // Don't request blocks that don't exist
+				continue
+			}
+			
+			// If peer height equals our height, still try to request (master might have new blocks)
+			// The get_blocks handler will return empty if blocks don't exist, which is fine
+			if startHeight > bestPeerHeight && bestPeerHeight == currentHeight {
+				core.LogDebug("Peer height equals local height (%d), but requesting anyway - master might have mined new blocks", currentHeight)
+				// Continue to request - the master might have new blocks that aren't reflected in peer.Height yet
 			}
 
 			core.LogInfo("🔄 Syncing blocks %d-%d from peer %s (local height: %d, peer height: %d)",
