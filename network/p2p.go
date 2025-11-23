@@ -754,8 +754,47 @@ func (p *P2P) addPeer(peer *Peer) {
 	p.peerMutex.Lock()
 	defer p.peerMutex.Unlock()
 
+	// Extract IP from address (remove port) for duplicate check
+	peerIP := peer.Address
+	if host, _, err := net.SplitHostPort(peer.Address); err == nil {
+		peerIP = host
+	}
+
+	// Get our own listen IP to check for self-connections
+	p.mu.RLock()
+	listenAddr := p.config.ListenAddr
+	p.mu.RUnlock()
+	
+	ownIP := ""
+	if host, _, err := net.SplitHostPort(listenAddr); err == nil {
+		ownIP = host
+	} else {
+		ownIP = listenAddr
+	}
+
+	// Don't add our own IP as peer
+	if peerIP == ownIP || peerIP == "127.0.0.1" || peerIP == "localhost" {
+		log.Printf("⚠️ [SELF_CONNECTION] Rejecting self-connection in addPeer: %s (Own IP: %s)", peer.Address, ownIP)
+		return
+	}
+
+	// Check for duplicate peer by IP (not just by ID, as ID includes port)
+	for existingID, existingPeer := range p.peers {
+		existingIP := existingPeer.Address
+		if host, _, err := net.SplitHostPort(existingPeer.Address); err == nil {
+			existingIP = host
+		}
+		
+		if existingIP == peerIP {
+			// Same IP already connected, remove old connection
+			log.Printf("🔄 [PEER_REPLACE] Replacing existing peer connection: %s (Old ID: %s, New ID: %s)", peerIP, existingID, peer.ID)
+			delete(p.peers, existingID)
+			break
+		}
+	}
+
 	p.peers[peer.ID] = peer
-	log.Printf("Peer connected: %s", peer.ID)
+	log.Printf("📡 [PEER_CONNECT] Peer connected: %s | IP: %s | Total peers: %d", peer.ID, peerIP, len(p.peers))
 }
 
 // removePeer removes a peer from the peer list
