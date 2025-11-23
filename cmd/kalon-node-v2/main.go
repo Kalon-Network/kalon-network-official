@@ -666,14 +666,17 @@ func (n *NodeV2) syncBlocks() {
 			}
 
 			// CRITICAL: Log what we're requesting to diagnose "Received 0 blocks" issue
-			core.LogInfo("🔄 Syncing blocks %d-%d from peer %s (local height: %d, peer height: %d)",
-				startHeight, endHeight, peerID, currentHeight, bestPeerHeight)
-			
-			// If we're requesting blocks beyond peer's height, log a warning
+			// CRITICAL: Check if we're requesting blocks beyond peer's height
 			if startHeight > bestPeerHeight {
-				core.LogWarn("⚠️ Requesting blocks %d-%d but peer height is only %d - this will return 0 blocks", startHeight, endHeight, bestPeerHeight)
+				// We're ahead of the peer or peer hasn't updated height yet
+				// This is normal - we'll check again in the next cycle (10 seconds)
+				core.LogDebug("Requesting blocks %d-%d but peer height is only %d (local: %d) - waiting for peer to catch up or update height", 
+					startHeight, endHeight, bestPeerHeight, currentHeight)
 				continue // Don't request blocks that don't exist
 			}
+
+			core.LogInfo("🔄 Syncing blocks %d-%d from peer %s (local height: %d, peer height: %d)",
+				startHeight, endHeight, peerID, currentHeight, bestPeerHeight)
 
 			if err := n.p2p.RequestBlocks(peerID, startHeight, endHeight); err != nil {
 				core.LogWarn("Failed to request blocks from peer %s: %v", peerID, err)
