@@ -365,11 +365,21 @@ func (p *P2P) handleConnection(conn net.Conn) {
 		Conn:      conn,
 		LastSeen:  time.Now(),
 		Connected: true,
+		Height:    0, // Will be updated via version message
 	}
 
 	// Add peer
 	p.addPeer(peer)
 	defer p.removePeer(peer.ID)
+
+	// Send version message immediately (without height for now, as we don't have a callback)
+	versionMsg := &Message{
+		Type:    "version",
+		Data:    map[string]interface{}{"version": "1.0"},
+		Version: "1.0",
+		Time:    time.Now(),
+	}
+	p.sendMessage(peer, versionMsg)
 
 	// Handle peer communication
 	p.handlePeerCommunication(peer)
@@ -441,9 +451,18 @@ func (p *P2P) handleVersionMessage(peer *Peer, message *Message) {
 	// Update peer version info
 	peer.mu.Lock()
 	peer.Version = message.Version
+
+	// Extract height from message data if present
+	if data, ok := message.Data.(map[string]interface{}); ok {
+		if heightFloat, ok := data["height"].(float64); ok {
+			peer.Height = uint64(heightFloat)
+		} else if heightUint, ok := data["height"].(uint64); ok {
+			peer.Height = heightUint
+		}
+	}
 	peer.mu.Unlock()
 
-	// Send version response
+	// Send version response (without height for now, as we don't have a callback)
 	response := &Message{
 		Type:    "version",
 		Data:    map[string]interface{}{"version": "1.0"},
@@ -764,7 +783,7 @@ func (p *P2P) addPeer(peer *Peer) {
 	p.mu.RLock()
 	listenAddr := p.config.ListenAddr
 	p.mu.RUnlock()
-	
+
 	ownIP := ""
 	if host, _, err := net.SplitHostPort(listenAddr); err == nil {
 		ownIP = host
@@ -784,7 +803,7 @@ func (p *P2P) addPeer(peer *Peer) {
 		if host, _, err := net.SplitHostPort(existingPeer.Address); err == nil {
 			existingIP = host
 		}
-		
+
 		if existingIP == peerIP {
 			// Same IP already connected, remove old connection
 			log.Printf("🔄 [PEER_REPLACE] Replacing existing peer connection: %s (Old ID: %s, New ID: %s)", peerIP, existingID, peer.ID)
@@ -879,11 +898,21 @@ func (p *P2P) connectToPeer(address string) {
 		Conn:      conn,
 		LastSeen:  time.Now(),
 		Connected: true,
+		Height:    0, // Will be updated via version message
 	}
 
 	// Add peer
 	p.addPeer(peer)
 	defer p.removePeer(peer.ID)
+
+	// Send version message immediately (without height for now, as we don't have a callback)
+	versionMsg := &Message{
+		Type:    "version",
+		Data:    map[string]interface{}{"version": "1.0"},
+		Version: "1.0",
+		Time:    time.Now(),
+	}
+	p.sendMessage(peer, versionMsg)
 
 	// Handle peer communication
 	p.handlePeerCommunication(peer)
