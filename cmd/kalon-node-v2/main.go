@@ -647,22 +647,36 @@ func (n *NodeV2) syncBlocks() {
 
 			// CRITICAL: Always request blocks from currentHeight + 1
 			// This ensures we get new blocks as soon as they're mined
-			// Even if peerHeight == currentHeight now, it might be higher in the next check
+			// Even if peerHeight == currentHeight now, the master might have mined new blocks
 			startHeight := currentHeight + 1
 
 			// Request blocks in batches of 100 (limit from get_blocks handler)
 			endHeight := startHeight + 99
-			// Don't request beyond peer's height
-			if endHeight > bestPeerHeight {
-				endHeight = bestPeerHeight
+			
+			// CRITICAL: If peer height equals our height, the master might have mined new blocks
+			// that aren't reflected in peer.Height yet. We should still request.
+			// Only limit endHeight if peer is actually ahead of us
+			if bestPeerHeight > currentHeight {
+				// Peer is ahead, don't request beyond peer's height
+				if endHeight > bestPeerHeight {
+					endHeight = bestPeerHeight
+				}
 			}
+			// If bestPeerHeight == currentHeight, we still request (master might have new blocks)
 
-			// Only request if there are blocks to request (startHeight <= endHeight)
-			if startHeight > endHeight {
-				// Peer is at same height, no new blocks yet
-				// This is normal - we'll check again in the next cycle (10 seconds)
-				core.LogDebug("Peer is at same height (peer: %d, local: %d), waiting for new blocks", bestPeerHeight, currentHeight)
+			// Only skip if peer is behind us (shouldn't happen, but handle gracefully)
+			if startHeight > endHeight && bestPeerHeight < currentHeight {
+				// Peer is behind us, skip
+				core.LogDebug("Peer is behind us (peer: %d, local: %d), skipping", bestPeerHeight, currentHeight)
 				continue
+			}
+			
+			// If peer height equals our height, still request (master might have new blocks)
+			// The get_blocks handler will return empty if blocks don't exist, which is fine
+			if startHeight > endHeight && bestPeerHeight == currentHeight {
+				// Reset endHeight to allow at least one block request
+				endHeight = startHeight
+				core.LogDebug("Peer height equals local height (%d), requesting block %d anyway - master might have mined new blocks", currentHeight, startHeight)
 			}
 
 			// CRITICAL: Log what we're requesting to diagnose "Received 0 blocks" issue
