@@ -598,41 +598,65 @@ func (n *NodeV2) syncBlocks() {
 			}
 
 			// Find a peer with higher block height
-			// For now, request blocks from any peer (we'll improve this later)
-			// Since we don't know peer height, we'll request blocks starting from current height + 1
+			// Check peer heights and sync from the highest peer
+			var bestPeer *network.Peer
+			var bestPeerHeight uint64
+			
 			for _, peer := range peers {
-				peerID := peer.ID
-
-				// CRITICAL: Smart sync strategy
-				// Normal case: sync from currentHeight + 1
-				// Only sync from block 1 if we're very early (< 10)
-				var startHeight uint64
-
-				if currentHeight < 10 {
-					// Very early in sync, start from block 1 to ensure complete chain
-					startHeight = 1
-					core.LogInfo("🔄 Starting initial sync from block 1 (current height: %d)", currentHeight)
-				} else {
-					// Normal sync: request blocks starting from current height + 1
-					startHeight = currentHeight + 1
+				// Get peer height (from Peer struct's Height field)
+				peerHeight := peer.Height
+				if peerHeight > bestPeerHeight {
+					bestPeerHeight = peerHeight
+					bestPeer = peer
 				}
+			}
 
-				// Request blocks in batches of 100 (limit from get_blocks handler)
-				endHeight := startHeight + 99
+			// If no peer found or all peers are at same/lesser height, skip
+			if bestPeer == nil {
+				core.LogDebug("No peers available for syncing")
+				continue
+			}
 
-				// Only request if we're behind
-				if startHeight <= currentHeight {
-					// Already have these blocks, skip
-					continue
-				}
+			// Only sync if peer has higher height
+			if bestPeerHeight <= currentHeight {
+				core.LogDebug("All peers are at same or lower height (peer: %d, local: %d)", bestPeerHeight, currentHeight)
+				continue
+			}
 
-				core.LogInfo("🔄 Syncing blocks %d-%d from peer %s (current height: %d)",
-					startHeight, endHeight, peerID, currentHeight)
+			peerID := bestPeer.ID
 
-				if err := n.p2p.RequestBlocks(peerID, startHeight, endHeight); err != nil {
-					core.LogWarn("Failed to request blocks from peer %s: %v", peerID, err)
-				}
-				break // Only sync from one peer at a time
+			// CRITICAL: Smart sync strategy
+			// Normal case: sync from currentHeight + 1
+			// Only sync from block 1 if we're very early (< 10)
+			var startHeight uint64
+
+			if currentHeight < 10 {
+				// Very early in sync, start from block 1 to ensure complete chain
+				startHeight = 1
+				core.LogInfo("🔄 Starting initial sync from block 1 (current height: %d, peer height: %d)", currentHeight, bestPeerHeight)
+			} else {
+				// Normal sync: request blocks starting from current height + 1
+				startHeight = currentHeight + 1
+			}
+
+			// Request blocks in batches of 100 (limit from get_blocks handler)
+			endHeight := startHeight + 99
+			// Don't request beyond peer's height
+			if endHeight > bestPeerHeight {
+				endHeight = bestPeerHeight
+			}
+
+			// Only request if we're behind
+			if startHeight <= currentHeight {
+				// Already have these blocks, skip
+				continue
+			}
+
+			core.LogInfo("🔄 Syncing blocks %d-%d from peer %s (local height: %d, peer height: %d)",
+				startHeight, endHeight, peerID, currentHeight, bestPeerHeight)
+
+			if err := n.p2p.RequestBlocks(peerID, startHeight, endHeight); err != nil {
+				core.LogWarn("Failed to request blocks from peer %s: %v", peerID, err)
 			}
 		}
 	}
