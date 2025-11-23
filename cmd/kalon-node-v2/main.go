@@ -581,7 +581,7 @@ func (n *NodeV2) syncBlocks() {
 					consecutiveStuckCycles++
 					if consecutiveStuckCycles >= 3 {
 						// We're stuck for 90+ seconds - likely chain mismatch
-						core.LogWarn("⚠️ CRITICAL: Node stuck at height %d for %v - likely chain mismatch!", 
+						core.LogWarn("⚠️ CRITICAL: Node stuck at height %d for %v - likely chain mismatch!",
 							currentHeight, now.Sub(lastHeightTime))
 						core.LogWarn("⚠️ Solution: Delete chaindb and re-sync from block 1")
 						core.LogWarn("⚠️ Command: rm -rf data/testnet/chaindb && sudo systemctl restart kalon-seed-node")

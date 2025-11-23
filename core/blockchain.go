@@ -643,25 +643,25 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 	// If history is incomplete, difficulty calculation may be inaccurate
 	// In this case, we should be more lenient with difficulty validation
 	historyIncomplete := false
-	
+
 	// Method 1: Check if current height is much larger than history size
 	// If we're at block 463 but only have 50 blocks in history, many blocks are missing
 	currentHeight := bc.height
 	if currentHeight > 0 && len(blockHistory) < int(currentHeight)/3 {
 		// If we have less than 1/3 of the current height in history, history is incomplete
 		historyIncomplete = true
-		LogDebug("Block history incomplete: have %d blocks in history, but at height %d (at block #%d)", 
+		LogDebug("Block history incomplete: have %d blocks in history, but at height %d (at block #%d)",
 			len(blockHistory), currentHeight, block.Header.Number)
 	}
-	
+
 	// Method 2: Check if we have fewer blocks in history than expected window size
 	// If windowSize is 120 but we only have 50 blocks, history is incomplete
 	if !historyIncomplete && len(blockHistory) < windowSize/2 && block.Header.Number >= uint64(windowSize) {
 		historyIncomplete = true
-		LogDebug("Block history incomplete: have %d blocks, expected ~%d (at block #%d)", 
+		LogDebug("Block history incomplete: have %d blocks, expected ~%d (at block #%d)",
 			len(blockHistory), windowSize, block.Header.Number)
 	}
-	
+
 	// Method 3: Check for large gaps in block history timestamps (indicates missing blocks)
 	if !historyIncomplete && len(blockHistory) > 1 {
 		// Check for large gaps in block history (indicates missing blocks)
@@ -701,14 +701,14 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 
 	// Determine max allowed difference based on history completeness and difficulty difference
 	maxAllowedDiff := int64(1) // Default: ±1 for rounding
-	
+
 	// If difficulty difference is large (>10), history is likely incomplete even if not detected
 	// This is a fallback for cases where history detection fails
 	if difficultyDiff > 10 {
 		historyIncomplete = true // Force incomplete history detection
 		LogDebug("Large difficulty difference (%d) detected, treating history as incomplete", difficultyDiff)
 	}
-	
+
 	if historyIncomplete {
 		// If history is incomplete, allow larger tolerance (±10% or ±5, whichever is larger)
 		maxAllowedDiff = int64(5) // Allow up to ±5 when history is incomplete

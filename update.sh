@@ -77,3 +77,4 @@ echo ""
 print_success "Update successful. Miner can be restarted."
 echo ""
 
+
