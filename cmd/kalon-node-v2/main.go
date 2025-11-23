@@ -504,7 +504,10 @@ func (n *NodeV2) setupP2PIntegration() {
 
 		// Check if startHeight is valid
 		if startHeight > currentHeight {
-			core.LogDebug("get_blocks: startHeight %d > currentHeight %d, returning empty", startHeight, currentHeight)
+			// Seed Node is asking for blocks that don't exist yet
+			// This is normal - the master might not have mined these blocks yet
+			// Return empty list (no error) - the seed node will check again later
+			core.LogDebug("get_blocks: startHeight %d > currentHeight %d (seed node ahead or master hasn't mined yet), returning empty", startHeight, currentHeight)
 			return []*network.Block{}, nil
 		}
 
@@ -662,8 +665,15 @@ func (n *NodeV2) syncBlocks() {
 				continue
 			}
 
+			// CRITICAL: Log what we're requesting to diagnose "Received 0 blocks" issue
 			core.LogInfo("🔄 Syncing blocks %d-%d from peer %s (local height: %d, peer height: %d)",
 				startHeight, endHeight, peerID, currentHeight, bestPeerHeight)
+			
+			// If we're requesting blocks beyond peer's height, log a warning
+			if startHeight > bestPeerHeight {
+				core.LogWarn("⚠️ Requesting blocks %d-%d but peer height is only %d - this will return 0 blocks", startHeight, endHeight, bestPeerHeight)
+				continue // Don't request blocks that don't exist
+			}
 
 			if err := n.p2p.RequestBlocks(peerID, startHeight, endHeight); err != nil {
 				core.LogWarn("Failed to request blocks from peer %s: %v", peerID, err)
