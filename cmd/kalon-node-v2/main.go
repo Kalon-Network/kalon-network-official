@@ -569,6 +569,7 @@ func (n *NodeV2) syncBlocks() {
 			peers := n.p2p.GetPeers()
 
 			if len(peers) == 0 {
+				core.LogDebug("No peers connected yet, waiting for peer connection...")
 				continue
 			}
 
@@ -601,19 +602,32 @@ func (n *NodeV2) syncBlocks() {
 			// Check peer heights and sync from the highest peer
 			var bestPeer *network.Peer
 			var bestPeerHeight uint64
-			
+			var peersWithHeight int
+
 			for _, peer := range peers {
 				// Get peer height (from Peer struct's Height field)
 				peerHeight := peer.Height
+				
+				// Count peers with valid height (> 0)
+				if peerHeight > 0 {
+					peersWithHeight++
+				}
+				
 				if peerHeight > bestPeerHeight {
 					bestPeerHeight = peerHeight
 					bestPeer = peer
 				}
 			}
 
-			// If no peer found or all peers are at same/lesser height, skip
+			// If no peer found, skip
 			if bestPeer == nil {
 				core.LogDebug("No peers available for syncing")
+				continue
+			}
+
+			// If peer height is still 0, wait for version message
+			if bestPeerHeight == 0 {
+				core.LogDebug("Peer height not yet received (waiting for version message), peers with height: %d/%d", peersWithHeight, len(peers))
 				continue
 			}
 
