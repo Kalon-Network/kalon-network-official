@@ -607,12 +607,12 @@ func (n *NodeV2) syncBlocks() {
 			for _, peer := range peers {
 				// Get peer height (from Peer struct's Height field)
 				peerHeight := peer.Height
-				
+
 				// Count peers with valid height (> 0)
 				if peerHeight > 0 {
 					peersWithHeight++
 				}
-				
+
 				if peerHeight > bestPeerHeight {
 					bestPeerHeight = peerHeight
 					bestPeer = peer
@@ -640,17 +640,18 @@ func (n *NodeV2) syncBlocks() {
 			peerID := bestPeer.ID
 
 			// CRITICAL: Smart sync strategy
-			// Normal case: sync from currentHeight + 1
-			// Only sync from block 1 if we're very early (< 10)
+			// Always sync from currentHeight + 1 (never from block 1 unless we're at genesis)
+			// Only sync from block 1 if we're at genesis (height 0 or 1)
 			var startHeight uint64
 
-			if currentHeight < 10 {
-				// Very early in sync, start from block 1 to ensure complete chain
+			if currentHeight <= 1 {
+				// At genesis, start from block 1 to ensure complete chain
 				startHeight = 1
 				core.LogInfo("🔄 Starting initial sync from block 1 (current height: %d, peer height: %d)", currentHeight, bestPeerHeight)
 			} else {
 				// Normal sync: request blocks starting from current height + 1
 				startHeight = currentHeight + 1
+				core.LogDebug("🔄 Continuing sync from block %d (current height: %d, peer height: %d)", startHeight, currentHeight, bestPeerHeight)
 			}
 
 			// Request blocks in batches of 100 (limit from get_blocks handler)
