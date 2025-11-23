@@ -54,7 +54,7 @@ WorkingDirectory=$(pwd)
 ExecStart=$(pwd)/build/kalon-node-v2 \\
     -datadir $(pwd)/data/testnet \\
     -genesis $(pwd)/genesis/testnet.json \\
-    -rpc 127.0.0.1:16316 \\
+    -rpc 0.0.0.0:16316 \\
     -p2p 0.0.0.0:17335 \\
     -seednodes 185.133.249.107:17335
 Restart=always
