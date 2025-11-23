@@ -588,9 +588,9 @@ func (p *P2P) handleGetBlocksMessage(peer *Peer, message *Message) {
 	}
 
 	if err := p.sendMessage(peer, response); err != nil {
-		log.Printf("Failed to send blocks to peer %s: %v", peer.ID, err)
+		log.Printf("❌ [SEND_BLOCKS] Failed to send blocks to peer %s: %v", peer.ID, err)
 	} else {
-		log.Printf("Sent %d blocks to peer %s", len(blocks), peer.ID)
+		log.Printf("📤 [SEND_BLOCKS] Sent %d blocks to peer %s (range: %d-%d)", len(blocks), peer.ID, startHeight, endHeight)
 	}
 }
 
@@ -677,15 +677,18 @@ func (p *P2P) handleBlocksMessage(peer *Peer, message *Message) {
 		newBlocksAdded := successCount - alreadyExistsCount
 
 		if newBlocksAdded > 0 {
-			log.Printf("✅ Processed %d blocks from peer %s: %d new blocks added, %d already existed, %d failed (%d parent errors, %d validation errors)",
+			log.Printf("✅ [BLOCKS_PROCESSED] Processed %d blocks from peer %s: %d NEW blocks added, %d already existed, %d failed (%d parent errors, %d validation errors)",
 				len(blocks), peer.ID, newBlocksAdded, alreadyExistsCount, errorCount, parentErrors, validationErrors)
 		} else if alreadyExistsCount > 0 {
 			// All blocks already exist - this is normal during re-sync
-			log.Printf("ℹ️  Processed %d blocks from peer %s: all %d blocks already exist (chain is up to date)",
+			log.Printf("ℹ️  [BLOCKS_PROCESSED] Processed %d blocks from peer %s: all %d blocks already exist (chain is up to date)",
 				len(blocks), peer.ID, alreadyExistsCount)
-		} else {
-			log.Printf("❌ Processed %d blocks from peer %s: %d successful, %d failed (%d parent errors, %d validation errors)",
+		} else if errorCount > 0 {
+			log.Printf("❌ [BLOCKS_PROCESSED] Processed %d blocks from peer %s: %d successful, %d FAILED (%d parent errors, %d validation errors)",
 				len(blocks), peer.ID, successCount, errorCount, parentErrors, validationErrors)
+		} else {
+			log.Printf("⚠️  [BLOCKS_PROCESSED] Processed %d blocks from peer %s: %d successful, %d failed - NO NEW BLOCKS ADDED!",
+				len(blocks), peer.ID, successCount, errorCount)
 		}
 
 		// If all blocks failed due to parent errors, we have a chain mismatch
