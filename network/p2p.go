@@ -560,7 +560,7 @@ func (p *P2P) handleGetBlocksMessage(peer *Peer, message *Message) {
 		}
 	}
 
-	log.Printf("Received get_blocks request from peer %s: %d-%d", peer.ID, startHeight, endHeight)
+	log.Printf("📥 [GET_BLOCKS_REQUEST] Received get_blocks request from peer %s (IP: %s): %d-%d", peer.ID, peer.Address, startHeight, endHeight)
 
 	// Call handler if set
 	p.mu.RLock()
