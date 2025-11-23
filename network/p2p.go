@@ -609,7 +609,7 @@ func (p *P2P) handleBlocksMessage(peer *Peer, message *Message) {
 		return
 	}
 
-	log.Printf("✅ [BLOCKS_RECEIVED] Received %d blocks from peer %s", len(blocks), peer.ID)
+	log.Printf("✅ [BLOCKS_RECEIVED] Received %d blocks from peer %s (IP: %s)", len(blocks), peer.ID, peer.Address)
 
 	// CRITICAL: Sort blocks by height to ensure sequential processing
 	// This ensures parent blocks are processed before child blocks
