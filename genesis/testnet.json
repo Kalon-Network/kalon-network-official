@@ -37,9 +37,7 @@
       "treasuryCapPercent": 10
     }
   },
-  "seedNodes": [
-    "185.133.249.107:17335"
-  ],
+  "seedNodes": [],
   "snapshot": {
     "enabled": true,
     "height": 1,
