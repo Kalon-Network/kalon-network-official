@@ -640,25 +640,12 @@ func (n *NodeV2) syncBlocks() {
 				continue
 			}
 
-			// Peer is at same or higher height - always try to sync from currentHeight + 1
-			// This ensures we get new blocks as soon as they're mined
-
 			peerID := bestPeer.ID
 
-			// CRITICAL: Smart sync strategy
-			// Always sync from currentHeight + 1 (never from block 1 unless we're at genesis)
-			// Only sync from block 1 if we're at genesis (height 0 or 1)
-			var startHeight uint64
-
-			if currentHeight <= 1 {
-				// At genesis, start from block 1 to ensure complete chain
-				startHeight = 1
-				core.LogInfo("🔄 Starting initial sync from block 1 (current height: %d, peer height: %d)", currentHeight, bestPeerHeight)
-			} else {
-				// Normal sync: request blocks starting from current height + 1
-				startHeight = currentHeight + 1
-				core.LogDebug("🔄 Continuing sync from block %d (current height: %d, peer height: %d)", startHeight, currentHeight, bestPeerHeight)
-			}
+			// CRITICAL: Always request blocks from currentHeight + 1
+			// This ensures we get new blocks as soon as they're mined
+			// Even if peerHeight == currentHeight now, it might be higher in the next check
+			startHeight := currentHeight + 1
 
 			// Request blocks in batches of 100 (limit from get_blocks handler)
 			endHeight := startHeight + 99
@@ -667,24 +654,12 @@ func (n *NodeV2) syncBlocks() {
 				endHeight = bestPeerHeight
 			}
 
-			// CRITICAL: Always request if startHeight > currentHeight
-			// This ensures we get new blocks as soon as they're available
-			if startHeight <= currentHeight {
-				// Already have these blocks, but peer might have new ones
-				// Check if peer has higher height than us
-				if bestPeerHeight > currentHeight {
-					// Peer has new blocks, request them
-					startHeight = currentHeight + 1
-					endHeight = startHeight + 99
-					if endHeight > bestPeerHeight {
-						endHeight = bestPeerHeight
-					}
-					core.LogDebug("Peer has new blocks, requesting from %d to %d (current: %d, peer: %d)", startHeight, endHeight, currentHeight, bestPeerHeight)
-				} else {
-					// Peer is at same height, no new blocks yet
-					core.LogDebug("Peer is at same height (peer: %d, local: %d), waiting for new blocks", bestPeerHeight, currentHeight)
-					continue
-				}
+			// Only request if there are blocks to request (startHeight <= endHeight)
+			if startHeight > endHeight {
+				// Peer is at same height, no new blocks yet
+				// This is normal - we'll check again in the next cycle (10 seconds)
+				core.LogDebug("Peer is at same height (peer: %d, local: %d), waiting for new blocks", bestPeerHeight, currentHeight)
+				continue
 			}
 
 			core.LogInfo("🔄 Syncing blocks %d-%d from peer %s (local height: %d, peer height: %d)",
