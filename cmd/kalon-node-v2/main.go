@@ -651,7 +651,7 @@ func (n *NodeV2) syncBlocks() {
 
 			// Request blocks in batches of 100 (limit from get_blocks handler)
 			endHeight := startHeight + 99
-			
+
 			// CRITICAL: Limit endHeight to peer's height if peer is ahead
 			// This ensures we don't request blocks that don't exist yet
 			if bestPeerHeight > currentHeight {
@@ -667,7 +667,7 @@ func (n *NodeV2) syncBlocks() {
 
 			// CRITICAL: Only skip if startHeight > endHeight (shouldn't happen, but safety check)
 			if startHeight > endHeight {
-				core.LogDebug("Skipping sync: startHeight %d > endHeight %d (local: %d, peer: %d)", 
+				core.LogDebug("Skipping sync: startHeight %d > endHeight %d (local: %d, peer: %d)",
 					startHeight, endHeight, currentHeight, bestPeerHeight)
 				continue
 			}
@@ -675,8 +675,12 @@ func (n *NodeV2) syncBlocks() {
 			core.LogInfo("🔄 Syncing blocks %d-%d from peer %s (local height: %d, peer height: %d)",
 				startHeight, endHeight, peerID, currentHeight, bestPeerHeight)
 
+			// CRITICAL: Log before and after RequestBlocks to see if it's called
+			core.LogInfo("📤 [SYNC] Calling RequestBlocks(%s, %d, %d)", peerID, startHeight, endHeight)
 			if err := n.p2p.RequestBlocks(peerID, startHeight, endHeight); err != nil {
-				core.LogWarn("Failed to request blocks from peer %s: %v", peerID, err)
+				core.LogWarn("❌ [SYNC] Failed to request blocks from peer %s: %v", peerID, err)
+			} else {
+				core.LogInfo("✅ [SYNC] RequestBlocks call successful for peer %s", peerID)
 			}
 		}
 	}
