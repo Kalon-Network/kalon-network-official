@@ -296,8 +296,14 @@ func (p *P2P) RequestBlocks(peerID string, startHeight uint64, endHeight uint64)
 		Time:    time.Now(),
 	}
 
-	log.Printf("Requesting blocks %d-%d from peer %s", startHeight, endHeight, peerID)
-	return p.sendMessage(peer, message)
+	log.Printf("📤 [REQUEST_BLOCKS] Requesting blocks %d-%d from peer %s", startHeight, endHeight, peerID)
+	err := p.sendMessage(peer, message)
+	if err != nil {
+		log.Printf("❌ [REQUEST_BLOCKS] Failed to send get_blocks request to peer %s: %v", peerID, err)
+	} else {
+		log.Printf("✅ [REQUEST_BLOCKS] Successfully sent get_blocks request to peer %s", peerID)
+	}
+	return err
 }
 
 // GetBlockChannel returns the block channel
@@ -603,7 +609,7 @@ func (p *P2P) handleBlocksMessage(peer *Peer, message *Message) {
 		return
 	}
 
-	log.Printf("Received %d blocks from peer %s", len(blocks), peer.ID)
+	log.Printf("✅ [BLOCKS_RECEIVED] Received %d blocks from peer %s", len(blocks), peer.ID)
 
 	// CRITICAL: Sort blocks by height to ensure sequential processing
 	// This ensures parent blocks are processed before child blocks
