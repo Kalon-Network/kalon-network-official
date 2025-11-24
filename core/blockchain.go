@@ -747,6 +747,11 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 		return fmt.Errorf("invalid transaction count: expected %d, got %d", len(block.Txs), block.Header.TxCount)
 	}
 
+	// Validate block rewards (CRITICAL: Prevents inflation)
+	if err := bc.validateBlockRewards(block, parent); err != nil {
+		return fmt.Errorf("invalid block rewards: %v", err)
+	}
+
 	// CRITICAL: Validate all transactions in the block (including signatures)
 	// This ensures that only valid, signed transactions are included in blocks
 	for i, tx := range block.Txs {
@@ -761,6 +766,129 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 	}
 
 	return nil
+}
+
+// validateBlockRewards validates that block reward transactions match expected values
+// CRITICAL: This prevents miners from creating blocks with incorrect rewards (inflation attack)
+func (bc *BlockchainV2) validateBlockRewards(block *Block, parent *Block) error {
+	if len(block.Txs) == 0 {
+		return fmt.Errorf("block must contain at least one transaction (miner reward)")
+	}
+
+	// Calculate expected block reward distribution
+	baseReward := bc.genesis.GetCurrentReward(block.Header.Number)
+
+	// Calculate transaction fees from non-reward transactions
+	txFees := uint64(0)
+	rewardTxCount := 0
+	for _, tx := range block.Txs {
+		if isBlockRewardTransaction(&tx) {
+			rewardTxCount++
+		} else {
+			txFees += tx.Fee
+		}
+	}
+
+	// Calculate expected reward distribution
+	expectedRewardDist := bc.genesis.CalculateNetworkFees(baseReward, txFees)
+
+	// First transaction must be miner reward
+	if !isBlockRewardTransaction(&block.Txs[0]) {
+		return fmt.Errorf("first transaction must be a block reward transaction for miner")
+	}
+
+	// Validate miner reward amount
+	minerRewardTx := &block.Txs[0]
+	minerRewardAmount := uint64(0)
+	if len(minerRewardTx.Outputs) > 0 {
+		minerRewardAmount = minerRewardTx.Outputs[0].Amount
+	} else {
+		minerRewardAmount = minerRewardTx.Amount
+	}
+
+	if minerRewardAmount != expectedRewardDist.MinerReward {
+		return fmt.Errorf("invalid miner reward: expected %d, got %d (block height: %d, baseReward: %f, txFees: %d)",
+			expectedRewardDist.MinerReward, minerRewardAmount, block.Header.Number, baseReward, txFees)
+	}
+
+	// Validate miner address matches block header
+	if minerRewardTx.To != block.Header.Miner {
+		return fmt.Errorf("miner reward recipient does not match block miner: expected %x, got %x",
+			block.Header.Miner, minerRewardTx.To)
+	}
+
+	// Check for treasury reward (optional, second transaction)
+	if expectedRewardDist.TreasuryReward > 0 && bc.genesis.TreasuryAddress != "" {
+		if len(block.Txs) < 2 {
+			return fmt.Errorf("block must contain treasury reward transaction (expected reward: %d)",
+				expectedRewardDist.TreasuryReward)
+		}
+
+		treasuryRewardTx := &block.Txs[1]
+		if !isBlockRewardTransaction(treasuryRewardTx) {
+			return fmt.Errorf("second transaction must be a block reward transaction for treasury")
+		}
+
+		// Validate treasury reward amount
+		treasuryRewardAmount := uint64(0)
+		if len(treasuryRewardTx.Outputs) > 0 {
+			treasuryRewardAmount = treasuryRewardTx.Outputs[0].Amount
+		} else {
+			treasuryRewardAmount = treasuryRewardTx.Amount
+		}
+
+		if treasuryRewardAmount != expectedRewardDist.TreasuryReward {
+			return fmt.Errorf("invalid treasury reward: expected %d, got %d",
+				expectedRewardDist.TreasuryReward, treasuryRewardAmount)
+		}
+
+		// Validate treasury address
+		expectedTreasuryAddr := AddressFromString(bc.genesis.TreasuryAddress)
+		if treasuryRewardTx.To != expectedTreasuryAddr {
+			return fmt.Errorf("treasury reward recipient does not match treasury address: expected %x, got %x",
+				expectedTreasuryAddr, treasuryRewardTx.To)
+		}
+	} else if len(block.Txs) >= 2 && isBlockRewardTransaction(&block.Txs[1]) {
+		// Treasury reward exists but should not (reward is 0 or treasury address not configured)
+		return fmt.Errorf("treasury reward transaction found but treasury reward should be 0 or treasury address not configured")
+	}
+
+	// Validate that block header treasury fee matches expected
+	if block.Header.TreasuryFee != expectedRewardDist.TreasuryReward {
+		return fmt.Errorf("invalid treasury fee in block header: expected %d, got %d",
+			expectedRewardDist.TreasuryReward, block.Header.TreasuryFee)
+	}
+
+	// Validate that block header network fee matches transaction fees
+	if block.Header.NetworkFee != txFees {
+		return fmt.Errorf("invalid network fee in block header: expected %d (sum of tx fees), got %d",
+			txFees, block.Header.NetworkFee)
+	}
+
+	return nil
+}
+
+// isBlockRewardTransaction checks if a transaction is a block reward transaction
+func isBlockRewardTransaction(tx *Transaction) bool {
+	if tx == nil {
+		return false
+	}
+
+	// Block reward transactions have:
+	// - Empty From address
+	// - Data field contains "block_reward"
+	// - Empty Inputs (no UTXO inputs)
+	// - Empty Signature (no signature needed for coinbase)
+	// - Fee = 0
+	// - Nonce = 0
+	isReward := tx.From == (Address{}) &&
+		string(tx.Data) == "block_reward" &&
+		len(tx.Inputs) == 0 &&
+		len(tx.Signature) == 0 &&
+		tx.Fee == 0 &&
+		tx.Nonce == 0
+
+	return isReward
 }
 
 // GetBestBlock returns the best block thread-safely
