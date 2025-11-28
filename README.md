@@ -114,6 +114,16 @@ This will:
 ```
 
 #### Start Miner
+
+**Option 1: Using systemd service (Recommended for production)**
+```bash
+# If systemd service is configured:
+sudo systemctl start kalon-miner
+sudo systemctl enable kalon-miner  # Auto-start on boot
+sudo systemctl status kalon-miner   # Check status
+```
+
+**Option 2: Using nohup (For testing or if no systemd service)**
 ```bash
 nohup ./build/kalon-miner-v2 \
   --wallet YOUR_WALLET_ADDRESS \
@@ -126,6 +136,8 @@ This will:
 - Start miner in background using nohup
 - Save logs to `logs/miner.log`
 - Continue running after SSH disconnect
+
+**Note**: For production use, systemd service is recommended as it provides better process management and automatic restarts.
 
 #### Check Miner Status
 ```bash
@@ -156,11 +168,11 @@ chmod +x miner-logs.sh
 
 #### Stop Miner
 ```bash
-# Option 1: Using pkill (if started with nohup)
-pkill -f kalon-miner-v2
+# Option 1: Using systemd service (if configured)
+sudo systemctl stop kalon-miner
 
-# Option 2: If using systemd service (if configured)
-# sudo systemctl stop kalon-miner
+# Option 2: Using pkill (if started with nohup)
+pkill -f kalon-miner-v2
 ```
 
 #### Check Balance
@@ -290,7 +302,11 @@ This endpoint allows you to:
   --address YOUR_ADDRESS \
   --rpc https://explorer.kalon-network.com/rpc
 
-# Start mining (runs in background)
+# Start mining (using systemd service if available, otherwise nohup)
+# Option 1: systemd service (recommended)
+sudo systemctl start kalon-miner
+
+# Option 2: nohup (for testing)
 nohup ./build/kalon-miner-v2 \
   --wallet YOUR_ADDRESS \
   --threads 2 \
@@ -327,8 +343,11 @@ nohup ./build/kalon-miner-v2 \
 ## 📞 Support
 
 For issues and questions:
-- Check miner logs: `tail -f miner.log` (if using nohup)
+- Check miner logs: 
+  - If using systemd: `journalctl -u kalon-miner -f`
+  - If using nohup: `tail -f logs/miner.log`
 - Verify RPC endpoint is accessible: `curl https://explorer.kalon-network.com/rpc`
+- Check miner status: `sudo systemctl status kalon-miner` or `./miner-status.sh`
 - Review this README
 - Ensure wallet file exists and is correct
 
