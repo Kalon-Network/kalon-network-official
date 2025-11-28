@@ -156,7 +156,11 @@ chmod +x miner-logs.sh
 
 #### Stop Miner
 ```bash
+# Option 1: Using pkill (if started with nohup)
 pkill -f kalon-miner-v2
+
+# Option 2: If using systemd service (if configured)
+# sudo systemctl stop kalon-miner
 ```
 
 #### Check Balance
