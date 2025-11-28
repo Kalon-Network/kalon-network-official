@@ -49,12 +49,21 @@ echo ""
 # Step 2: Build binaries
 print_info "Step 2: Building binaries..."
 
-# Create build directory
-mkdir -p build
+# Create build-v2 directory
+mkdir -p build-v2
+
+# Build node
+print_info "Building kalon-node-v2..."
+if go build -o build-v2/kalon-node-v2 ./cmd/kalon-node-v2; then
+    print_success "kalon-node-v2 built successfully"
+else
+    print_error "Failed to build kalon-node-v2"
+    exit 1
+fi
 
 # Build miner
 print_info "Building kalon-miner-v2..."
-if go build -o build/kalon-miner-v2 cmd/kalon-miner-v2/main.go; then
+if go build -o build-v2/kalon-miner-v2 ./cmd/kalon-miner-v2; then
     print_success "kalon-miner-v2 built successfully"
 else
     print_error "Failed to build kalon-miner-v2"
@@ -63,7 +72,7 @@ fi
 
 # Build wallet
 print_info "Building kalon-wallet..."
-if go build -o build/kalon-wallet cmd/kalon-wallet/main.go; then
+if go build -o build-v2/kalon-wallet ./cmd/kalon-wallet; then
     print_success "kalon-wallet built successfully"
 else
     print_error "Failed to build kalon-wallet"
@@ -71,7 +80,7 @@ else
 fi
 
 # Make binaries executable
-chmod +x build/kalon-miner-v2 build/kalon-wallet 2>/dev/null || true
+chmod +x build-v2/kalon-node-v2 build-v2/kalon-miner-v2 build-v2/kalon-wallet 2>/dev/null || true
 
 echo ""
 print_success "Update successful. Miner can be restarted."
