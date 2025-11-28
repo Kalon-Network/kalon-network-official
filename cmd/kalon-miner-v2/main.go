@@ -44,6 +44,7 @@ type MinerConfig struct {
 	Threads       int
 	RPCURL        string
 	StatsInterval time.Duration
+	MinerName     string // Optional miner name for display in explorer
 }
 
 // MiningStats represents mining statistics
@@ -69,11 +70,12 @@ type RPCBlockchainV2 struct {
 	client    *http.Client
 	mu        sync.RWMutex
 	lastBlock *core.Block
+	minerName string // Optional miner name
 }
 
 // NewMinerV2 creates a new professional miner
 func NewMinerV2(config *MinerConfig) *MinerV2 {
-	blockchain, err := NewRPCBlockchainV2(config.RPCURL)
+	blockchain, err := NewRPCBlockchainV2(config.RPCURL, config.MinerName)
 	if err != nil {
 		core.LogError("Failed to create RPC blockchain: %v", err)
 		return nil
@@ -90,10 +92,11 @@ func NewMinerV2(config *MinerConfig) *MinerV2 {
 }
 
 // NewRPCBlockchainV2 creates a new professional RPC blockchain client
-func NewRPCBlockchainV2(rpcURL string) (*RPCBlockchainV2, error) {
+func NewRPCBlockchainV2(rpcURL string, minerName string) (*RPCBlockchainV2, error) {
 	return &RPCBlockchainV2{
-		rpcURL: rpcURL,
-		client: &http.Client{Timeout: 30 * time.Second},
+		rpcURL:    rpcURL,
+		client:    &http.Client{Timeout: 30 * time.Second},
+		minerName: minerName,
 	}, nil
 }
 
@@ -426,6 +429,9 @@ func (rpc *RPCBlockchainV2) CreateNewBlock(miner core.Address, txs []core.Transa
 	difficulty, _ := result["difficulty"].(float64)
 	parentHashStr, _ := result["parentHash"].(string)
 	timestamp, _ := result["timestamp"].(float64)
+	networkFee, _ := result["networkFee"].(float64)
+	treasuryFee, _ := result["treasuryFee"].(float64)
+	core.LogDebug("Extracted from RPC template: networkFee=%f, treasuryFee=%f", networkFee, treasuryFee)
 
 	// Parse parent hash
 	parentHashBytes, err := hex.DecodeString(parentHashStr)
@@ -623,6 +629,21 @@ func (rpc *RPCBlockchainV2) CreateNewBlock(miner core.Address, txs []core.Transa
 		merkleRoot = calculateMerkleRoot(blockTxs)
 	}
 
+	// CRITICAL: Extract miner address from first transaction (miner reward transaction)
+	// This ensures the miner address in the block header matches the reward transaction
+	blockMiner := miner // Default to parsed miner address
+	if len(blockTxs) > 0 {
+		// First transaction is always the miner reward transaction
+		rewardTx := blockTxs[0]
+		// Use the recipient address from the reward transaction (To or Outputs[0].Address)
+		if rewardTx.To != (core.Address{}) {
+			blockMiner = rewardTx.To
+		} else if len(rewardTx.Outputs) > 0 {
+			blockMiner = rewardTx.Outputs[0].Address
+		}
+		core.LogDebug("Using miner address from reward transaction: %x (parsed: %x)", blockMiner, miner)
+	}
+
 	// Create block with transactions from RPC server
 	block := &core.Block{
 		Header: core.BlockHeader{
@@ -630,12 +651,12 @@ func (rpc *RPCBlockchainV2) CreateNewBlock(miner core.Address, txs []core.Transa
 			Number:      uint64(number),
 			Timestamp:   time.Unix(int64(timestamp), 0),
 			Difficulty:  uint64(difficulty),
-			Miner:       miner,
+			Miner:       blockMiner, // CRITICAL: Use miner address from reward transaction
 			Nonce:       0,
 			MerkleRoot:  merkleRoot, // Calculate merkle root from transactions
 			TxCount:     uint32(len(blockTxs)),
-			NetworkFee:  0,
-			TreasuryFee: 0,
+			NetworkFee:  uint64(networkFee),  // CRITICAL: Use networkFee from RPC template
+			TreasuryFee: uint64(treasuryFee), // CRITICAL: Use treasuryFee from RPC template
 		},
 		Txs:  blockTxs, // Use transactions from RPC server
 		Hash: core.Hash{},
@@ -697,24 +718,33 @@ func (rpc *RPCBlockchainV2) AddBlock(block *core.Block) error {
 		transactions = append(transactions, txMap)
 	}
 
+	params := map[string]interface{}{
+		"block": map[string]interface{}{
+			"number":       float64(block.Header.Number),
+			"difficulty":   float64(block.Header.Difficulty),
+			"nonce":        float64(block.Header.Nonce),
+			"hash":         hex.EncodeToString(block.Hash[:]),
+			"parentHash":   hex.EncodeToString(block.Header.ParentHash[:]),
+			"timestamp":    float64(block.Header.Timestamp.Unix()),
+			"merkleRoot":   hex.EncodeToString(block.Header.MerkleRoot[:]), // Include merkle root
+			"txCount":      float64(block.Header.TxCount),
+			"miner":        hex.EncodeToString(block.Header.Miner[:]), // Include miner address
+			"networkFee":   float64(block.Header.NetworkFee),          // CRITICAL: Include networkFee
+			"treasuryFee":  float64(block.Header.TreasuryFee),         // CRITICAL: Include treasuryFee
+			"transactions": transactions,                              // CRITICAL: Include transactions!
+		},
+	}
+
+	// Add optional miner name if set
+	if rpc.minerName != "" {
+		params["minerName"] = rpc.minerName
+	}
+
 	req := RPCRequest{
 		JSONRPC: "2.0",
 		Method:  "submitBlock",
-		Params: map[string]interface{}{
-			"block": map[string]interface{}{
-				"number":       float64(block.Header.Number),
-				"difficulty":   float64(block.Header.Difficulty),
-				"nonce":        float64(block.Header.Nonce),
-				"hash":         hex.EncodeToString(block.Hash[:]),
-				"parentHash":   hex.EncodeToString(block.Header.ParentHash[:]),
-				"timestamp":    float64(block.Header.Timestamp.Unix()),
-				"merkleRoot":   hex.EncodeToString(block.Header.MerkleRoot[:]), // Include merkle root
-				"txCount":      float64(block.Header.TxCount),
-				"miner":        hex.EncodeToString(block.Header.Miner[:]), // Include miner address
-				"transactions": transactions,                              // CRITICAL: Include transactions!
-			},
-		},
-		ID: 3,
+		Params:  params,
+		ID:      3,
 	}
 
 	resp, err := rpc.callRPC(req)
@@ -971,6 +1001,7 @@ func main() {
 		rpcURL        = flag.String("rpc", "http://localhost:16316", "RPC server URL")
 		statsInterval = flag.Duration("stats", 30*time.Second, "Statistics reporting interval")
 		logLevel      = flag.String("loglevel", "info", "Log level (debug, info, warn, error)")
+		minerName     = flag.String("miner-name", "", "Optional miner name (displayed in explorer)")
 	)
 	flag.Parse()
 
@@ -987,6 +1018,7 @@ func main() {
 		Threads:       *threads,
 		RPCURL:        *rpcURL,
 		StatsInterval: *statsInterval,
+		MinerName:     *minerName,
 	}
 
 	miner := NewMinerV2(config)

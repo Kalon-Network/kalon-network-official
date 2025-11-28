@@ -3,7 +3,10 @@ package core
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -28,6 +31,21 @@ type BlockchainV2 struct {
 	blockIndex map[string]*Block // Key: hex-encoded block hash
 	// Block history: Separate structure for LWMA difficulty adjustment (uses separate lock)
 	blockHistory *BlockHistory
+	// Seed node wallets: Map of active seed node wallet addresses (for fee distribution)
+	seedNodeWallets map[string]bool // Key: wallet address, Value: true if active
+	// Seed node info: Map of IP -> SeedNodeInfo (for height checking)
+	seedNodeInfo map[string]*SeedNodeInfo // Key: IP address, Value: seed node info
+	// Account nonces: Map of address -> last used nonce (for transaction nonce validation)
+	accountNonces map[string]uint64 // Key: hex-encoded address, Value: last used nonce
+}
+
+// SeedNodeInfo contains information about a seed node
+type SeedNodeInfo struct {
+	IP            string
+	WalletAddress string
+	Status        string
+	Height        uint64 // Current height of the seed node (0 = unknown)
+	LastChecked   time.Time
 }
 
 // BlockPersister defines the interface for persisting blocks
@@ -118,8 +136,14 @@ func NewBlockchainV2(genesis *GenesisConfig, persister BlockPersister) *Blockcha
 		SnapshotManager: NewSnapshotManager(),
 		forkBlocks:      make(map[string][]*Block),
 		blockIndex:      make(map[string]*Block),
-		blockHistory:    NewBlockHistory(windowSize), // NEW: Initialize block history
+		blockHistory:    NewBlockHistory(windowSize),    // NEW: Initialize block history
+		seedNodeWallets: make(map[string]bool),          // Initialize seed node wallets map
+		seedNodeInfo:    make(map[string]*SeedNodeInfo), // Initialize seed node info map
+		accountNonces:   make(map[string]uint64),        // Initialize account nonces map
 	}
+
+	// Load seed node wallets from seed-nodes.json
+	bc.loadSeedNodeWallets()
 
 	// Try to load existing chain from storage
 	if bc.storage != nil {
@@ -133,8 +157,14 @@ func NewBlockchainV2(genesis *GenesisConfig, persister BlockPersister) *Blockcha
 
 	// Create genesis block if chain is empty
 	if bc.height == 0 {
+		LogDebug("Creating genesis block...")
 		genesisBlock := bc.createGenesisBlockV2()
-		bc.addBlockV2(genesisBlock)
+		LogDebug("Genesis block created, adding to chain...")
+		if err := bc.addBlockV2(genesisBlock); err != nil {
+			LogError("Failed to add genesis block: %v", err)
+			return nil
+		}
+		LogDebug("Genesis block added successfully")
 
 		// Restore snapshot from genesis config if available
 		LogDebug("Checking for snapshot in genesis config...")
@@ -145,6 +175,7 @@ func NewBlockchainV2(genesis *GenesisConfig, persister BlockPersister) *Blockcha
 		}
 	}
 
+	LogDebug("NewBlockchainV2 completed successfully, height: %d", bc.height)
 	return bc
 }
 
@@ -319,8 +350,12 @@ func (bc *BlockchainV2) addBlockV2(block *Block) error {
 	var parentBlock *Block = nil
 	var parentHash Hash
 
-	// Determine parent hash first (without storage access)
-	if bc.bestBlock != nil {
+	// Special case: Genesis block (height 0) has no parent
+	if block.Header.Number == 0 {
+		LogDebug("addBlockV2: Genesis block detected, skipping fork detection")
+		parentBlock = nil
+	} else if bc.bestBlock != nil {
+		// Determine parent hash first (without storage access)
 		if block.Header.Number == bc.bestBlock.Header.Number {
 			// Same height but different hash = fork
 			if block.Hash != bc.bestBlock.Hash {
@@ -382,10 +417,12 @@ func (bc *BlockchainV2) addBlockV2(block *Block) error {
 	}
 
 	// Validate block (with parent block if fork detected)
+	LogDebug("addBlockV2: Validating block #%d with parent %v", block.Header.Number, parentBlock != nil)
 	if err := bc.validateBlockV2WithParent(block, parentBlock); err != nil {
 		bc.mu.Unlock()
 		return fmt.Errorf("block validation failed: %v", err)
 	}
+	LogDebug("addBlockV2: Block #%d validation complete", block.Header.Number)
 
 	// Store block in index
 	bc.blockIndex[blockHashKey] = block
@@ -437,6 +474,7 @@ func (bc *BlockchainV2) addBlockV2(block *Block) error {
 	}
 
 	// Normal case: add block to chain
+	LogDebug("addBlockV2: Processing %d transactions", len(block.Txs))
 	// Process UTXOs for all transactions in the block
 	for _, tx := range block.Txs {
 		bc.processTransactionUTXOs(&tx, block.Hash)
@@ -445,9 +483,15 @@ func (bc *BlockchainV2) addBlockV2(block *Block) error {
 	}
 
 	// Add block atomically to in-memory structures
+	LogDebug("addBlockV2: Adding block to chain structures")
 	bc.blocks = append(bc.blocks, block)
 	bc.height = block.Header.Number
 	bc.bestBlock = block
+
+	// Update account nonces for all transactions in the block
+	LogDebug("addBlockV2: Updating account nonces")
+	bc.updateAccountNonces(block)
+	LogDebug("addBlockV2: Account nonces updated")
 
 	// CRITICAL: Update block history OUTSIDE main lock (uses separate lock)
 	// This prevents blocking createBlockTemplate
@@ -633,51 +677,7 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 		windowSize = 120 // Default window size
 	}
 	blockHistory := bc.blockHistory.GetWindow(windowSize)
-	// CRITICAL: Use block's timestamp instead of time.Now() for difficulty calculation
-	// This ensures consistent difficulty validation regardless of when the block is received
-	// DEBUG: Log difficulty calculation details
-	LogDebug("Difficulty validation for block #%d: parent #%d difficulty=%d, blockHistory len=%d, blockTimestamp=%v",
-		block.Header.Number, parent.Header.Number, parent.Header.Difficulty, len(blockHistory), block.Header.Timestamp)
-
-	// CRITICAL: Check if block history is incomplete (has gaps)
-	// If history is incomplete, difficulty calculation may be inaccurate
-	// In this case, we should be more lenient with difficulty validation
-	historyIncomplete := false
-
-	// Method 1: Check if current height is much larger than history size
-	// If we're at block 463 but only have 50 blocks in history, many blocks are missing
-	currentHeight := bc.height
-	if currentHeight > 0 && len(blockHistory) < int(currentHeight)/3 {
-		// If we have less than 1/3 of the current height in history, history is incomplete
-		historyIncomplete = true
-		LogDebug("Block history incomplete: have %d blocks in history, but at height %d (at block #%d)",
-			len(blockHistory), currentHeight, block.Header.Number)
-	}
-
-	// Method 2: Check if we have fewer blocks in history than expected window size
-	// If windowSize is 120 but we only have 50 blocks, history is incomplete
-	if !historyIncomplete && len(blockHistory) < windowSize/2 && block.Header.Number >= uint64(windowSize) {
-		historyIncomplete = true
-		LogDebug("Block history incomplete: have %d blocks, expected ~%d (at block #%d)",
-			len(blockHistory), windowSize, block.Header.Number)
-	}
-
-	// Method 3: Check for large gaps in block history timestamps (indicates missing blocks)
-	if !historyIncomplete && len(blockHistory) > 1 {
-		// Check for large gaps in block history (indicates missing blocks)
-		for i := 1; i < len(blockHistory); i++ {
-			timeDiff := blockHistory[i].Sub(blockHistory[i-1])
-			// If gap is > 5x target block time, likely missing blocks
-			if timeDiff > time.Duration(bc.genesis.BlockTimeTarget)*5*time.Second {
-				historyIncomplete = true
-				LogDebug("Block history has gap: %v between blocks (likely missing blocks)", timeDiff)
-				break
-			}
-		}
-	}
-
-	expectedDifficulty := consensusManager.CalculateDifficultyWithTimestamp(block.Header.Number, parent, blockHistory, block.Header.Timestamp)
-	LogDebug("Difficulty validation result: expected=%d, block has=%d, historyIncomplete=%v", expectedDifficulty, block.Header.Difficulty, historyIncomplete)
+	expectedDifficulty := consensusManager.CalculateDifficulty(block.Header.Number, parent, blockHistory)
 
 	// Allow difficulty to be within MinDifficulty/MaxDifficulty range (due to caps)
 	minDiff := bc.genesis.Difficulty.MinDifficulty
@@ -691,45 +691,8 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 		}
 	}
 
-	// Allow tolerance for difficulty due to:
-	// 1. Floating point rounding differences (±1)
-	// 2. Incomplete block history (larger tolerance needed)
-	difficultyDiff := int64(block.Header.Difficulty) - int64(expectedDifficulty)
-	if difficultyDiff < 0 {
-		difficultyDiff = -difficultyDiff
-	}
-
-	// Determine max allowed difference based on history completeness and difficulty difference
-	maxAllowedDiff := int64(1) // Default: ±1 for rounding
-
-	// If difficulty difference is large (>10), history is likely incomplete even if not detected
-	// This is a fallback for cases where history detection fails
-	if difficultyDiff > 10 {
-		historyIncomplete = true // Force incomplete history detection
-		LogDebug("Large difficulty difference (%d) detected, treating history as incomplete", difficultyDiff)
-	}
-
-	if historyIncomplete {
-		// If history is incomplete, allow larger tolerance (±10% or ±5, whichever is larger)
-		maxAllowedDiff = int64(5) // Allow up to ±5 when history is incomplete
-		if maxAllowedDiff < int64(expectedDifficulty)/10 {
-			maxAllowedDiff = int64(expectedDifficulty) / 10
-		}
-		// Also allow at least the current difference if it's reasonable (<50% of expected)
-		if difficultyDiff < int64(expectedDifficulty)/2 && difficultyDiff > maxAllowedDiff {
-			maxAllowedDiff = difficultyDiff + 1 // Allow current difference + 1
-		}
-		LogDebug("Difficulty validation with incomplete history: allowing ±%d tolerance", maxAllowedDiff)
-	}
-
-	if difficultyDiff > maxAllowedDiff {
-		// Only reject if difference exceeds tolerance
-		return fmt.Errorf("invalid difficulty: expected %d, got %d (diff: %d, max allowed: %d, historyIncomplete: %v)",
-			expectedDifficulty, block.Header.Difficulty, difficultyDiff, maxAllowedDiff, historyIncomplete)
-	} else if difficultyDiff > 0 {
-		// Log warning but allow (within tolerance)
-		LogDebug("Difficulty tolerance: expected %d, got %d (allowing ±%d tolerance, historyIncomplete: %v)",
-			expectedDifficulty, block.Header.Difficulty, maxAllowedDiff, historyIncomplete)
+	if block.Header.Difficulty != expectedDifficulty {
+		return fmt.Errorf("invalid difficulty: expected %d, got %d", expectedDifficulty, block.Header.Difficulty)
 	}
 
 	// Validate merkle root
@@ -747,17 +710,27 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 		return fmt.Errorf("invalid transaction count: expected %d, got %d", len(block.Txs), block.Header.TxCount)
 	}
 
-	// Validate block rewards (CRITICAL: Prevents inflation)
-	if err := bc.validateBlockRewards(block, parent); err != nil {
-		return fmt.Errorf("invalid block rewards: %v", err)
-	}
-
-	// CRITICAL: Validate all transactions in the block (including signatures)
+	// CRITICAL: Validate all transactions in the block (including signatures and nonces)
 	// This ensures that only valid, signed transactions are included in blocks
 	for i, tx := range block.Txs {
+		// Skip nonce validation for block reward transactions
+		if !isBlockRewardTransaction(&tx) {
+			// Validate transaction nonce (prevents replay attacks)
+			if err := bc.validateTransactionNonce(&tx); err != nil {
+				return fmt.Errorf("invalid transaction %d nonce: %v", i, err)
+			}
+		}
+
+		// Validate transaction signature and other fields
 		if err := consensusManager.ValidateTransaction(&tx); err != nil {
 			return fmt.Errorf("invalid transaction %d: %v", i, err)
 		}
+	}
+
+	// Validate block rewards (CRITICAL: Prevents inflation)
+	// IMPORTANT: This must be called AFTER individual transactions are validated
+	if err := bc.validateBlockRewards(block, parent); err != nil {
+		return fmt.Errorf("invalid block rewards: %v", err)
 	}
 
 	// Validate proof of work
@@ -766,129 +739,6 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 	}
 
 	return nil
-}
-
-// validateBlockRewards validates that block reward transactions match expected values
-// CRITICAL: This prevents miners from creating blocks with incorrect rewards (inflation attack)
-func (bc *BlockchainV2) validateBlockRewards(block *Block, parent *Block) error {
-	if len(block.Txs) == 0 {
-		return fmt.Errorf("block must contain at least one transaction (miner reward)")
-	}
-
-	// Calculate expected block reward distribution
-	baseReward := bc.genesis.GetCurrentReward(block.Header.Number)
-
-	// Calculate transaction fees from non-reward transactions
-	txFees := uint64(0)
-	rewardTxCount := 0
-	for _, tx := range block.Txs {
-		if isBlockRewardTransaction(&tx) {
-			rewardTxCount++
-		} else {
-			txFees += tx.Fee
-		}
-	}
-
-	// Calculate expected reward distribution
-	expectedRewardDist := bc.genesis.CalculateNetworkFees(baseReward, txFees)
-
-	// First transaction must be miner reward
-	if !isBlockRewardTransaction(&block.Txs[0]) {
-		return fmt.Errorf("first transaction must be a block reward transaction for miner")
-	}
-
-	// Validate miner reward amount
-	minerRewardTx := &block.Txs[0]
-	minerRewardAmount := uint64(0)
-	if len(minerRewardTx.Outputs) > 0 {
-		minerRewardAmount = minerRewardTx.Outputs[0].Amount
-	} else {
-		minerRewardAmount = minerRewardTx.Amount
-	}
-
-	if minerRewardAmount != expectedRewardDist.MinerReward {
-		return fmt.Errorf("invalid miner reward: expected %d, got %d (block height: %d, baseReward: %f, txFees: %d)",
-			expectedRewardDist.MinerReward, minerRewardAmount, block.Header.Number, baseReward, txFees)
-	}
-
-	// Validate miner address matches block header
-	if minerRewardTx.To != block.Header.Miner {
-		return fmt.Errorf("miner reward recipient does not match block miner: expected %x, got %x",
-			block.Header.Miner, minerRewardTx.To)
-	}
-
-	// Check for treasury reward (optional, second transaction)
-	if expectedRewardDist.TreasuryReward > 0 && bc.genesis.TreasuryAddress != "" {
-		if len(block.Txs) < 2 {
-			return fmt.Errorf("block must contain treasury reward transaction (expected reward: %d)",
-				expectedRewardDist.TreasuryReward)
-		}
-
-		treasuryRewardTx := &block.Txs[1]
-		if !isBlockRewardTransaction(treasuryRewardTx) {
-			return fmt.Errorf("second transaction must be a block reward transaction for treasury")
-		}
-
-		// Validate treasury reward amount
-		treasuryRewardAmount := uint64(0)
-		if len(treasuryRewardTx.Outputs) > 0 {
-			treasuryRewardAmount = treasuryRewardTx.Outputs[0].Amount
-		} else {
-			treasuryRewardAmount = treasuryRewardTx.Amount
-		}
-
-		if treasuryRewardAmount != expectedRewardDist.TreasuryReward {
-			return fmt.Errorf("invalid treasury reward: expected %d, got %d",
-				expectedRewardDist.TreasuryReward, treasuryRewardAmount)
-		}
-
-		// Validate treasury address
-		expectedTreasuryAddr := AddressFromString(bc.genesis.TreasuryAddress)
-		if treasuryRewardTx.To != expectedTreasuryAddr {
-			return fmt.Errorf("treasury reward recipient does not match treasury address: expected %x, got %x",
-				expectedTreasuryAddr, treasuryRewardTx.To)
-		}
-	} else if len(block.Txs) >= 2 && isBlockRewardTransaction(&block.Txs[1]) {
-		// Treasury reward exists but should not (reward is 0 or treasury address not configured)
-		return fmt.Errorf("treasury reward transaction found but treasury reward should be 0 or treasury address not configured")
-	}
-
-	// Validate that block header treasury fee matches expected
-	if block.Header.TreasuryFee != expectedRewardDist.TreasuryReward {
-		return fmt.Errorf("invalid treasury fee in block header: expected %d, got %d",
-			expectedRewardDist.TreasuryReward, block.Header.TreasuryFee)
-	}
-
-	// Validate that block header network fee matches transaction fees
-	if block.Header.NetworkFee != txFees {
-		return fmt.Errorf("invalid network fee in block header: expected %d (sum of tx fees), got %d",
-			txFees, block.Header.NetworkFee)
-	}
-
-	return nil
-}
-
-// isBlockRewardTransaction checks if a transaction is a block reward transaction
-func isBlockRewardTransaction(tx *Transaction) bool {
-	if tx == nil {
-		return false
-	}
-
-	// Block reward transactions have:
-	// - Empty From address
-	// - Data field contains "block_reward"
-	// - Empty Inputs (no UTXO inputs)
-	// - Empty Signature (no signature needed for coinbase)
-	// - Fee = 0
-	// - Nonce = 0
-	isReward := tx.From == (Address{}) &&
-		string(tx.Data) == "block_reward" &&
-		len(tx.Inputs) == 0 &&
-		len(tx.Signature) == 0 &&
-		tx.Fee == 0 &&
-		tx.Nonce == 0
-
-	return isReward
 }
 
 // GetBestBlock returns the best block thread-safely
@@ -1064,7 +914,7 @@ func (bc *BlockchainV2) reorganizeChain(newBestBlock *Block) error {
 					if int(input.Index) < len(originalTx.Outputs) {
 						output := originalTx.Outputs[input.Index]
 						// Find the block that contained the original transaction
-						originalBlockHash := bc.findBlockHashForTransaction(input.PreviousTxHash)
+						originalBlockHash := bc.findBlockHashForTransactionUnsafe(input.PreviousTxHash)
 						if originalBlockHash != (Hash{}) {
 							// Restore the UTXO
 							bc.utxoSet.RestoreUTXO(input.PreviousTxHash, input.Index)
@@ -1329,10 +1179,18 @@ func (bc *BlockchainV2) findTransactionByHash(txHash Hash) *Transaction {
 	return nil
 }
 
-// findBlockHashForTransaction finds the block hash that contains a transaction
+// FindBlockHashForTransaction finds the block hash that contains a transaction
+// This is a public method that can be called from RPC server
+func (bc *BlockchainV2) FindBlockHashForTransaction(txHash Hash) Hash {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+	return bc.findBlockHashForTransactionUnsafe(txHash)
+}
+
+// findBlockHashForTransactionUnsafe finds the block hash that contains a transaction
 // NOTE: This function should NOT acquire locks if called from within reorganizeChain
 // It assumes the caller already holds the lock or doesn't need it
-func (bc *BlockchainV2) findBlockHashForTransaction(txHash Hash) Hash {
+func (bc *BlockchainV2) findBlockHashForTransactionUnsafe(txHash Hash) Hash {
 	// Search through all blocks (assuming lock is already held or not needed)
 	for _, block := range bc.blocks {
 		for _, tx := range block.Txs {
@@ -1552,8 +1410,16 @@ func (bc *BlockchainV2) CreateNewBlockV2(miner Address, txs []Transaction) *Bloc
 		txFees += tx.Fee
 	}
 
-	// Calculate network fees (Miner + Treasury distribution)
-	blockRewardDist := bc.genesis.CalculateNetworkFees(baseReward, txFees)
+	// Get seed node wallets for fee distribution
+	bc.mu.RLock()
+	seedNodeWallets := make(map[string]bool)
+	for addr := range bc.seedNodeWallets {
+		seedNodeWallets[addr] = true
+	}
+	bc.mu.RUnlock()
+
+	// Calculate network fees (Miner gets block reward only, Transaction fees go to Seed Nodes + Treasury)
+	blockRewardDist := bc.genesis.CalculateNetworkFees(baseReward, txFees, seedNodeWallets)
 
 	// Create block reward transaction for miner
 	minerRewardTx := bc.createBlockRewardTransaction(miner, blockRewardDist.MinerReward)
@@ -1592,7 +1458,16 @@ func (bc *BlockchainV2) CreateNewBlockV2(miner Address, txs []Transaction) *Bloc
 	if treasuryRewardTx != nil {
 		treasuryRewardTxSize = estimateTransactionSize(treasuryRewardTx)
 	}
-	baseBlockSize := minerRewardTxSize + treasuryRewardTxSize
+	// Estimate seed node reward transactions size (will be recalculated later)
+	seedNodeRewardTxSize := uint64(0)
+	if len(seedNodeWallets) > 0 {
+		// Rough estimate: each seed node reward tx is similar to treasury tx
+		seedNodeRewardTxSize = uint64(len(seedNodeWallets)) * treasuryRewardTxSize
+		if seedNodeRewardTxSize == 0 {
+			seedNodeRewardTxSize = uint64(len(seedNodeWallets)) * 200 // Fallback estimate
+		}
+	}
+	baseBlockSize := minerRewardTxSize + treasuryRewardTxSize + seedNodeRewardTxSize
 
 	// Select transactions up to limits
 	for _, tx := range sortedTxs {
@@ -1621,7 +1496,7 @@ func (bc *BlockchainV2) CreateNewBlockV2(miner Address, txs []Transaction) *Bloc
 	}
 
 	// Recalculate block reward distribution with actual fees
-	blockRewardDist = bc.genesis.CalculateNetworkFees(baseReward, txFees)
+	blockRewardDist = bc.genesis.CalculateNetworkFees(baseReward, txFees, seedNodeWallets)
 
 	// Update miner reward transaction with correct amount
 	minerRewardTx = bc.createBlockRewardTransaction(miner, blockRewardDist.MinerReward)
@@ -1632,11 +1507,25 @@ func (bc *BlockchainV2) CreateNewBlockV2(miner Address, txs []Transaction) *Bloc
 		treasuryRewardTx = bc.createBlockRewardTransactionPtr(treasuryAddr, blockRewardDist.TreasuryReward)
 	}
 
+	// Create seed node reward transactions
+	seedNodeRewardTxs := make([]Transaction, 0)
+	for walletAddr, rewardAmount := range blockRewardDist.SeedNodeRewards {
+		// Filter out placeholder addresses
+		if rewardAmount > 0 && walletAddr != "" && walletAddr != "KALON_ADDRESS" && walletAddr != "PLEASE_UPDATE_WALLET_ADDRESS" {
+			seedAddr := AddressFromString(walletAddr)
+			seedRewardTx := bc.createBlockRewardTransaction(seedAddr, rewardAmount)
+			seedNodeRewardTxs = append(seedNodeRewardTxs, seedRewardTx)
+			LogDebug("Seed node reward: %s -> %d micro-KALON", walletAddr, rewardAmount)
+		}
+	}
+
 	// Add reward transactions to the beginning of transactions
 	allTxs := []Transaction{minerRewardTx}
 	if treasuryRewardTx != nil {
 		allTxs = append(allTxs, *treasuryRewardTx)
 	}
+	// Add seed node reward transactions
+	allTxs = append(allTxs, seedNodeRewardTxs...)
 	allTxs = append(allTxs, selectedTxs...)
 
 	// Log block size information
@@ -1734,9 +1623,376 @@ func (bc *BlockchainV2) createBlockRewardTransaction(miner Address, amount uint6
 	return tx
 }
 
+// loadSeedNodeWallets loads active seed node wallet addresses from seed-nodes.json
+func (bc *BlockchainV2) loadSeedNodeWallets() {
+	// Try to load from genesis directory first, then from data directory
+	seedNodesFile := "genesis/seed-nodes.json"
+	if _, err := os.Stat(seedNodesFile); os.IsNotExist(err) {
+		// File doesn't exist, seed nodes will be empty
+		LogDebug("seed-nodes.json not found at %s, no seed node wallets loaded", seedNodesFile)
+		return
+	}
+
+	data, err := os.ReadFile(seedNodesFile)
+	if err != nil {
+		LogDebug("Could not read seed-nodes.json: %v (this is normal if file doesn't exist)", err)
+		return
+	}
+
+	var seedNodesConfig struct {
+		LicensedSeedNodes []struct {
+			IP            string `json:"ip"`
+			Status        string `json:"status"`
+			WalletAddress string `json:"walletAddress"`
+		} `json:"licensedSeedNodes"`
+	}
+
+	if err := json.Unmarshal(data, &seedNodesConfig); err != nil {
+		LogWarn("Failed to parse seed-nodes.json: %v", err)
+		return
+	}
+
+	// Extract seed node info and wallets
+	bc.mu.Lock()
+	bc.seedNodeWallets = make(map[string]bool)
+	bc.seedNodeInfo = make(map[string]*SeedNodeInfo)
+
+	for _, seed := range seedNodesConfig.LicensedSeedNodes {
+		if seed.Status == "active" {
+			// Extract IP from "IP:PORT" format
+			seedIP := seed.IP
+			if host, _, err := net.SplitHostPort(seed.IP); err == nil {
+				seedIP = host
+			}
+
+			// Store seed node info (even if wallet address is not set yet - can be updated later)
+			walletAddr := seed.WalletAddress
+			if walletAddr == "" || walletAddr == "PLEASE_UPDATE_WALLET_ADDRESS" || walletAddr == "KALON_ADDRESS" {
+				walletAddr = "" // Empty wallet address - will be updated via admin panel
+				LogWarn("Seed node %s is active but wallet address is not set. Please update via admin panel.", seed.IP)
+			}
+
+			bc.seedNodeInfo[seedIP] = &SeedNodeInfo{
+				IP:            seed.IP,
+				WalletAddress: walletAddr,
+				Status:        seed.Status,
+				Height:        0, // Will be updated when peer connects
+				LastChecked:   time.Now(),
+			}
+
+			// Note: Wallet will only be added to seedNodeWallets if height matches AND wallet address is set
+			if walletAddr != "" {
+				LogInfo("Loaded seed node info: %s (IP: %s, Wallet: %s)", seed.IP, seedIP, walletAddr)
+			} else {
+				LogInfo("Loaded seed node info: %s (IP: %s, Wallet: NOT SET - please update via admin panel)", seed.IP, seedIP)
+			}
+		}
+	}
+	bc.mu.Unlock()
+
+	LogInfo("Loaded %d active seed nodes (will check heights before fee distribution)", len(bc.seedNodeInfo))
+}
+
+// ReloadSeedNodeWallets reloads seed node wallets from seed-nodes.json
+// This can be called when seed-nodes.json is updated
+func (bc *BlockchainV2) ReloadSeedNodeWallets() {
+	bc.loadSeedNodeWallets()
+}
+
+// UpdateSeedNodeHeight updates the height of a seed node (called when peer connects/disconnects)
+// ip: IP address of the seed node (without port)
+// height: Current height of the seed node
+func (bc *BlockchainV2) UpdateSeedNodeHeight(ip string, height uint64) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	// Extract IP from "IP:PORT" format if needed
+	seedIP := ip
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		seedIP = host
+	}
+
+	if info, exists := bc.seedNodeInfo[seedIP]; exists {
+		oldHeight := info.Height
+		info.Height = height
+		info.LastChecked = time.Now()
+
+		currentHeight := bc.height
+		heightDiff := uint64(0)
+		if height > currentHeight {
+			heightDiff = height - currentHeight
+		} else {
+			heightDiff = currentHeight - height
+		}
+
+		// Check if seed node is eligible for fees (on same height as master +/- 1 block)
+		eligible := false
+		if heightDiff <= 1 {
+			eligible = true
+		}
+
+		// Update seedNodeWallets map based on eligibility
+		// Filter out placeholder addresses
+		walletAddr := info.WalletAddress
+		isPlaceholder := walletAddr == "" || walletAddr == "PLEASE_UPDATE_WALLET_ADDRESS" || walletAddr == "KALON_ADDRESS"
+
+		if eligible && !isPlaceholder {
+			// Add wallet to eligible list (only if wallet address is valid)
+			bc.seedNodeWallets[walletAddr] = true
+			LogInfo("✅ Seed node height updated: %s (IP: %s, Height: %d → %d, Master: %d, Eligible for fees)",
+				walletAddr, seedIP, oldHeight, height, currentHeight)
+		} else {
+			// Remove wallet from eligible list if not eligible or wallet address not set
+			if !isPlaceholder {
+				delete(bc.seedNodeWallets, walletAddr)
+			}
+			if !eligible {
+				LogWarn("⚠️ Seed node height mismatch: %s (IP: %s, Height: %d, Master: %d, Diff: %d, NOT eligible for fees)",
+					seedIP, seedIP, height, currentHeight, heightDiff)
+			} else if isPlaceholder {
+				LogWarn("⚠️ Seed node %s is synced but wallet address is not set or is a placeholder. Please update via admin panel to receive fees.", seedIP)
+			}
+		}
+	} else {
+		LogDebug("Seed node height update for unknown IP: %s (Height: %d)", seedIP, height)
+	}
+}
+
+// isBlockRewardTransaction checks if a transaction is a block reward transaction
+func isBlockRewardTransaction(tx *Transaction) bool {
+	if tx == nil {
+		return false
+	}
+
+	// Block reward transactions have:
+	// - Empty From address
+	// - Data field contains "block_reward" (can be "block_reward" or "block_reward:height:timestamp")
+	// - Empty Inputs (no UTXO inputs)
+	// - Empty Signature (no signature needed for coinbase)
+	// - Fee = 0
+	// - Nonce = 0
+	dataStr := string(tx.Data)
+	isRewardData := dataStr == "block_reward" || (len(dataStr) >= 13 && dataStr[:13] == "block_reward:")
+
+	isReward := tx.From == (Address{}) &&
+		isRewardData &&
+		len(tx.Inputs) == 0 &&
+		len(tx.Signature) == 0 &&
+		tx.Fee == 0 &&
+		tx.Nonce == 0
+
+	return isReward
+}
+
+// validateBlockRewards validates that block reward transactions match expected values
+// CRITICAL: This prevents miners from creating blocks with incorrect rewards (inflation attack)
+// IMPORTANT: Must use bc.seedNodeWallets (same as CreateNewBlockV2) for correct validation
+func (bc *BlockchainV2) validateBlockRewards(block *Block, parent *Block) error {
+	// Skip validation for genesis block (has no transactions)
+	if block.Header.Number == 0 {
+		return nil
+	}
+
+	if len(block.Txs) == 0 {
+		return fmt.Errorf("block must contain at least one transaction (miner reward)")
+	}
+
+	// Calculate expected block reward distribution
+	baseReward := bc.genesis.GetCurrentReward(block.Header.Number)
+
+	// Calculate transaction fees from non-reward transactions
+	txFees := uint64(0)
+	rewardTxCount := 0
+	for _, tx := range block.Txs {
+		if isBlockRewardTransaction(&tx) {
+			rewardTxCount++
+		} else {
+			txFees += tx.Fee
+		}
+	}
+
+	// CRITICAL: Use same seedNodeWallets as CreateNewBlockV2 for correct validation
+	// This ensures validation matches what miners actually create
+	// IMPORTANT: Lock is already held by caller (addBlockV2), so we don't need to lock again
+	seedNodeWallets := make(map[string]bool)
+	for addr := range bc.seedNodeWallets {
+		seedNodeWallets[addr] = true
+	}
+
+	// Calculate expected reward distribution (same calculation as CreateNewBlockV2)
+	expectedRewardDist := bc.genesis.CalculateNetworkFees(baseReward, txFees, seedNodeWallets)
+
+	// First transaction must be miner reward
+	if !isBlockRewardTransaction(&block.Txs[0]) {
+		return fmt.Errorf("first transaction must be a block reward transaction for miner")
+	}
+
+	// Validate miner reward amount
+	minerRewardTx := &block.Txs[0]
+	minerRewardAmount := uint64(0)
+	if len(minerRewardTx.Outputs) > 0 {
+		minerRewardAmount = minerRewardTx.Outputs[0].Amount
+	} else {
+		minerRewardAmount = minerRewardTx.Amount
+	}
+
+	if minerRewardAmount != expectedRewardDist.MinerReward {
+		return fmt.Errorf("invalid miner reward: expected %d, got %d (block height: %d, baseReward: %f, txFees: %d, seedNodes: %d)",
+			expectedRewardDist.MinerReward, minerRewardAmount, block.Header.Number, baseReward, txFees, len(seedNodeWallets))
+	}
+
+	// Validate miner address matches block header
+	if minerRewardTx.To != block.Header.Miner {
+		return fmt.Errorf("miner reward recipient does not match block miner: expected %x, got %x",
+			block.Header.Miner, minerRewardTx.To)
+	}
+
+	// Check for treasury reward (optional, position varies due to seed node rewards)
+	// Treasury reward can be at position 1, or later if seed node rewards exist
+	if expectedRewardDist.TreasuryReward > 0 && bc.genesis.TreasuryAddress != "" {
+		// Find treasury reward transaction (skip miner reward at position 0)
+		treasuryRewardTx := (*Transaction)(nil)
+		expectedTreasuryAddr := AddressFromString(bc.genesis.TreasuryAddress)
+
+		for i := 1; i < len(block.Txs); i++ {
+			tx := &block.Txs[i]
+			if isBlockRewardTransaction(tx) && tx.To == expectedTreasuryAddr {
+				treasuryRewardTx = tx
+				break
+			}
+		}
+
+		if treasuryRewardTx == nil {
+			return fmt.Errorf("block must contain treasury reward transaction (expected reward: %d)",
+				expectedRewardDist.TreasuryReward)
+		}
+
+		// Validate treasury reward amount
+		treasuryRewardAmount := uint64(0)
+		if len(treasuryRewardTx.Outputs) > 0 {
+			treasuryRewardAmount = treasuryRewardTx.Outputs[0].Amount
+		} else {
+			treasuryRewardAmount = treasuryRewardTx.Amount
+		}
+
+		if treasuryRewardAmount != expectedRewardDist.TreasuryReward {
+			return fmt.Errorf("invalid treasury reward: expected %d, got %d",
+				expectedRewardDist.TreasuryReward, treasuryRewardAmount)
+		}
+
+		// Validate treasury address
+		if treasuryRewardTx.To != expectedTreasuryAddr {
+			return fmt.Errorf("treasury reward recipient does not match treasury address: expected %x, got %x",
+				expectedTreasuryAddr, treasuryRewardTx.To)
+		}
+	} else { // If treasury reward is 0 or address not configured, ensure no treasury tx exists
+		expectedTreasuryAddr := AddressFromString(bc.genesis.TreasuryAddress)
+		if expectedTreasuryAddr != (Address{}) { // Only check if treasury address is actually configured
+			for i := 1; i < len(block.Txs); i++ {
+				tx := &block.Txs[i]
+				if isBlockRewardTransaction(tx) && tx.To == expectedTreasuryAddr {
+					return fmt.Errorf("treasury reward transaction found but treasury reward should be 0 or treasury address not configured")
+				}
+			}
+		}
+	}
+
+	// Validate that block header treasury fee matches expected
+	if block.Header.TreasuryFee != expectedRewardDist.TreasuryReward {
+		return fmt.Errorf("invalid treasury fee in block header: expected %d, got %d",
+			expectedRewardDist.TreasuryReward, block.Header.TreasuryFee)
+	}
+
+	// Validate that block header network fee matches transaction fees
+	if block.Header.NetworkFee != txFees {
+		return fmt.Errorf("invalid network fee in block header: expected %d (sum of tx fees), got %d",
+			txFees, block.Header.NetworkFee)
+	}
+
+	return nil
+}
+
+// validateTransactionNonce validates that a transaction has a valid nonce
+// Nonce must be higher than the last used nonce for the sender address
+func (bc *BlockchainV2) validateTransactionNonce(tx *Transaction) error {
+	if tx == nil {
+		return fmt.Errorf("transaction is nil")
+	}
+
+	// Block reward transactions don't have nonces
+	if isBlockRewardTransaction(tx) {
+		return nil
+	}
+
+	// Get sender address as hex string
+	senderAddr := hex.EncodeToString(tx.From[:])
+
+	// Get last used nonce for this address
+	bc.mu.RLock()
+	lastNonce, exists := bc.accountNonces[senderAddr]
+	bc.mu.RUnlock()
+
+	// If address has no previous transactions, nonce must be 0 or 1
+	if !exists {
+		if tx.Nonce > 1 {
+			return fmt.Errorf("nonce too high for new account: expected 0 or 1, got %d", tx.Nonce)
+		}
+		return nil
+	}
+
+	// Nonce must be exactly lastNonce + 1 (strict sequential)
+	expectedNonce := lastNonce + 1
+	if tx.Nonce != expectedNonce {
+		return fmt.Errorf("invalid nonce: expected %d, got %d (address: %s)", expectedNonce, tx.Nonce, senderAddr)
+	}
+
+	return nil
+}
+
+// updateAccountNonces updates the nonce for all addresses in a block
+// This is called after a block is successfully added to the chain
+// IMPORTANT: This function assumes the caller already holds bc.mu.Lock()
+func (bc *BlockchainV2) updateAccountNonces(block *Block) {
+	// NOTE: Lock is already held by caller (addBlockV2), so we don't need to lock again
+
+	for _, tx := range block.Txs {
+		// Skip block reward transactions
+		if isBlockRewardTransaction(&tx) {
+			continue
+		}
+
+		// Update nonce for sender address
+		senderAddr := hex.EncodeToString(tx.From[:])
+		currentNonce := bc.accountNonces[senderAddr]
+		if tx.Nonce > currentNonce {
+			bc.accountNonces[senderAddr] = tx.Nonce
+		}
+	}
+}
+
 // AddBlock adds a block to the blockchain
 func (bc *BlockchainV2) AddBlock(block *Block) error {
 	return bc.addBlockV2(block)
+}
+
+// GetSeedNodeInfo returns a copy of all seed node info
+func (bc *BlockchainV2) GetSeedNodeInfo() map[string]*SeedNodeInfo {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	// Create a copy to avoid race conditions
+	result := make(map[string]*SeedNodeInfo)
+	for ip, info := range bc.seedNodeInfo {
+		// Create a copy of the info
+		result[ip] = &SeedNodeInfo{
+			IP:            info.IP,
+			WalletAddress: info.WalletAddress,
+			Status:        info.Status,
+			Height:        info.Height,
+			LastChecked:   info.LastChecked,
+		}
+	}
+	return result
 }
 
 // loadChainFromStorage loads the blockchain from persistent storage
@@ -1795,6 +2051,10 @@ func (bc *BlockchainV2) loadChainFromStorage() {
 		for _, tx := range block.Txs {
 			bc.processTransactionUTXOs(&tx, block.Hash)
 		}
+
+		// IMPORTANT: Reconstruct account nonces for each block
+		// This is critical because accountNonces are in-memory and need to be rebuilt
+		bc.updateAccountNonces(block)
 	}
 
 	LogInfo("Loaded blockchain from storage - Height: %d, UTXOs restored", bc.height)

@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"os"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -51,12 +53,15 @@ type RPCError struct {
 
 // ServerV2 represents a professional RPC server
 type ServerV2 struct {
-	addr                  string
-	httpsAddr             string // HTTPS server address (e.g. ":16317")
-	certFile              string // SSL certificate file path
-	keyFile               string // SSL private key file path
-	blockchain            *core.BlockchainV2
-	p2pNetwork            interface{ GetPeerCount() int } // Interface for P2P network (optional)
+	addr       string
+	httpsAddr  string // HTTPS server address (e.g. ":16317")
+	certFile   string // SSL certificate file path
+	keyFile    string // SSL private key file path
+	blockchain *core.BlockchainV2
+	p2pNetwork interface {
+		GetPeerCount() int
+		GetPeerDetails() []map[string]interface{}
+	} // Interface for P2P network (optional)
 	mu                    sync.RWMutex
 	connections           map[string]*Connection
 	eventBus              *core.EventBus
@@ -117,7 +122,10 @@ func NewServerV2(addr string, blockchain *core.BlockchainV2) *ServerV2 {
 }
 
 // SetP2PNetwork sets the P2P network for peer count queries
-func (s *ServerV2) SetP2PNetwork(p2p interface{ GetPeerCount() int }) {
+func (s *ServerV2) SetP2PNetwork(p2p interface {
+	GetPeerCount() int
+	GetPeerDetails() []map[string]interface{}
+}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.p2pNetwork = p2p
@@ -324,6 +332,9 @@ func (s *ServerV2) handleRequest(w http.ResponseWriter, r *http.Request) {
 		"getBlockByHash":         true,
 		"getBlockByNumber":       true,
 		"getPeerCount":           true,
+		"getPeerDetails":         true,
+		"getSeedNodeFees":        true,
+		"getFeeDistribution":     true,
 		"getSnapshot":            true,
 	}
 
@@ -410,6 +421,12 @@ func (s *ServerV2) handleRPCMethod(req *RPCRequest) *RPCResponse {
 		return s.handleGetSnapshot(req)
 	case "getPeerCount":
 		return s.handleGetPeerCount(req)
+	case "getPeerDetails":
+		return s.handleGetPeerDetails(req)
+	case "getSeedNodeFees":
+		return s.handleGetSeedNodeFees(req)
+	case "getFeeDistribution":
+		return s.handleGetFeeDistribution(req)
 	case "getTotalTransactions":
 		return s.handleGetTotalTransactions(req)
 	case "getPendingTransactions":
@@ -434,6 +451,18 @@ func (s *ServerV2) handleRPCMethod(req *RPCRequest) *RPCResponse {
 		return s.handleSetWalletName(req)
 	case "getWalletName":
 		return s.handleGetWalletName(req)
+	case "registerSeedNode":
+		return s.handleRegisterSeedNode(req)
+	case "getSeedNodeRegistrations":
+		return s.handleGetSeedNodeRegistrations(req)
+	case "updateSeedNodeStatus":
+		return s.handleUpdateSeedNodeStatus(req)
+	case "getSeedNodeStatus":
+		return s.handleGetSeedNodeStatus(req)
+	case "reloadSeedNodes":
+		return s.handleReloadSeedNodes(req)
+	case "writeSeedNodes":
+		return s.handleWriteSeedNodes(req)
 	default:
 		return &RPCResponse{
 			JSONRPC: "2.0",
@@ -711,6 +740,21 @@ func (s *ServerV2) handleCreateBlockTemplateV2(req *RPCRequest) *RPCResponse {
 		}
 	}
 
+	// CRITICAL: Filter out placeholder addresses
+	// Log as DEBUG instead of ERROR to avoid log spam from misconfigured miners
+	if minerStr == "" || minerStr == "KALON_ADDRESS" || minerStr == "PLEASE_UPDATE_WALLET_ADDRESS" {
+		core.LogDebug("Invalid miner address: placeholder address '%s' is not allowed", minerStr)
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    fmt.Sprintf("Invalid miner address: placeholder address '%s' is not allowed. Please use a valid wallet address.", minerStr),
+			},
+			ID: req.ID,
+		}
+	}
+
 	// Parse miner address - handle kalon1 + hex format
 	var miner core.Address
 
@@ -863,6 +907,9 @@ func (s *ServerV2) handleCreateBlockTemplateV2(req *RPCRequest) *RPCResponse {
 			"parentHash":   hex.EncodeToString(block.Header.ParentHash[:]),
 			"timestamp":    block.Header.Timestamp.Unix(),
 			"miner":        hex.EncodeToString(block.Header.Miner[:]),
+			"networkFee":   block.Header.NetworkFee,                        // CRITICAL: Include networkFee for miner
+			"treasuryFee":  block.Header.TreasuryFee,                       // CRITICAL: Include treasuryFee for miner
+			"merkleRoot":   hex.EncodeToString(block.Header.MerkleRoot[:]), // CRITICAL: Include merkleRoot for miner
 			"transactions": txList,
 		},
 		ID: req.ID,
@@ -1198,16 +1245,28 @@ func (s *ServerV2) parseBlockData(data map[string]interface{}) (*core.Block, err
 		miner = core.AddressFromString(minerStr)
 	}
 
+	// Parse networkFee and treasuryFee from block data
+	var networkFee uint64 = 0
+	if networkFeeFloat, ok := data["networkFee"].(float64); ok {
+		networkFee = uint64(networkFeeFloat)
+	}
+	var treasuryFee uint64 = 0
+	if treasuryFeeFloat, ok := data["treasuryFee"].(float64); ok {
+		treasuryFee = uint64(treasuryFeeFloat)
+	}
+
 	// Create block with transactions
 	block := &core.Block{
 		Header: core.BlockHeader{
-			Number:     uint64(number),
-			Difficulty: uint64(difficulty),
-			Nonce:      uint64(nonce),
-			Timestamp:  time.Unix(int64(timestamp), 0),
-			MerkleRoot: merkleRoot, // Parse merkle root from block data
-			TxCount:    txCount,    // Parse tx count from block data
-			Miner:      miner,      // Parse miner address
+			Number:      uint64(number),
+			Difficulty:  uint64(difficulty),
+			Nonce:       uint64(nonce),
+			Timestamp:   time.Unix(int64(timestamp), 0),
+			MerkleRoot:  merkleRoot,  // Parse merkle root from block data
+			TxCount:     txCount,     // Parse tx count from block data
+			Miner:       miner,       // Parse miner address
+			NetworkFee:  networkFee,  // CRITICAL: Parse networkFee from block data
+			TreasuryFee: treasuryFee, // CRITICAL: Parse treasuryFee from block data
 		},
 		Txs: transactions, // Use parsed transactions
 	}
@@ -1846,6 +1905,138 @@ func (s *ServerV2) handleGetPeerCount(req *RPCRequest) *RPCResponse {
 	}
 }
 
+// handleGetPeerDetails handles getPeerDetails requests
+func (s *ServerV2) handleGetPeerDetails(req *RPCRequest) *RPCResponse {
+	s.mu.RLock()
+	p2p := s.p2pNetwork
+	s.mu.RUnlock()
+
+	if p2p != nil {
+		details := p2p.GetPeerDetails()
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Result: map[string]interface{}{
+				"peers": details,
+				"count": len(details),
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Return empty if P2P network not available
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result: map[string]interface{}{
+			"peers": []interface{}{},
+			"count": 0,
+		},
+		ID: req.ID,
+	}
+}
+
+// handleGetSeedNodeFees handles getSeedNodeFees requests
+// Returns fee earnings per seed node wallet address
+func (s *ServerV2) handleGetSeedNodeFees(req *RPCRequest) *RPCResponse {
+	s.mu.RLock()
+	blockchain := s.blockchain
+	s.mu.RUnlock()
+
+	if blockchain == nil {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Internal error",
+				Data:    "Blockchain not available",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Get seed node info from blockchain
+	// We need to add a getter method in blockchain.go to access seedNodeInfo
+	// For now, return structure with empty data
+	result := map[string]interface{}{
+		"seedNodes": []interface{}{},
+		"totalFees": uint64(0),
+		"note":      "Seed node fee tracking will be implemented with block analysis",
+	}
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result:  result,
+		ID:      req.ID,
+	}
+}
+
+// handleGetFeeDistribution handles getFeeDistribution requests
+// Returns current fee distribution breakdown
+func (s *ServerV2) handleGetFeeDistribution(req *RPCRequest) *RPCResponse {
+	s.mu.RLock()
+	blockchain := s.blockchain
+	s.mu.RUnlock()
+
+	if blockchain == nil {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Internal error",
+				Data:    "Blockchain not available",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Get fee distribution from genesis config
+	genesis := blockchain.GetGenesis()
+	if genesis == nil {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Internal error",
+				Data:    "Genesis config not available",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Fee distribution: 80% Seed Nodes, 20% Treasury, 0% Miner
+	result := map[string]interface{}{
+		"transactionFees": map[string]interface{}{
+			"seedNodes": map[string]interface{}{
+				"percentage":  80.0,
+				"description": "Distributed equally among active seed nodes on same height",
+			},
+			"treasury": map[string]interface{}{
+				"percentage":  20.0,
+				"description": "Network treasury",
+			},
+			"miner": map[string]interface{}{
+				"percentage":  0.0,
+				"description": "Miner receives NO transaction fees (only block rewards)",
+			},
+		},
+		"blockRewards": map[string]interface{}{
+			"miner": map[string]interface{}{
+				"amount":      "5.0 tKALON",
+				"description": "Block reward per block",
+			},
+			"treasury": map[string]interface{}{
+				"percentage":  genesis.NetworkFee.BlockFeeRate * 100,
+				"description": "Percentage of block reward",
+			},
+		},
+	}
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result:  result,
+		ID:      req.ID,
+	}
+}
+
 // handleGetMinerName handles getMinerName requests
 func (s *ServerV2) handleGetMinerName(req *RPCRequest) *RPCResponse {
 	params, ok := req.Params.(map[string]interface{})
@@ -2009,6 +2200,832 @@ func (s *ServerV2) handleGetWalletName(req *RPCRequest) *RPCResponse {
 		JSONRPC: "2.0",
 		Result:  walletName,
 		ID:      req.ID,
+	}
+}
+
+// handleRegisterSeedNode handles registerSeedNode requests
+func (s *ServerV2) handleRegisterSeedNode(req *RPCRequest) *RPCResponse {
+	params, ok := req.Params.(map[string]interface{})
+	if !ok {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Extract parameters
+	ip, ok := params["ip"].(string)
+	if !ok || ip == "" {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "ip parameter required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	txHash, ok := params["txHash"].(string)
+	if !ok || txHash == "" {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "txHash parameter required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Required parameter: wallet address
+	walletAddress, ok := params["walletAddress"].(string)
+	if !ok || walletAddress == "" {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "walletAddress parameter required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Validate wallet address format (basic validation - bech32 format)
+	if !strings.HasPrefix(walletAddress, "kalon") && !strings.HasPrefix(walletAddress, "tkalon") {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "walletAddress must be a valid Kalon address (kalon1... or tkalon1...)",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Optional parameters
+	name, _ := params["name"].(string)
+	description, _ := params["description"].(string)
+
+	// Validate IP format (must contain port)
+	if !strings.Contains(ip, ":") {
+		// Auto-add default port 17335 if not provided
+		ip = ip + ":17335"
+		core.LogInfo("Auto-added port 17335 to IP address: %s", ip)
+	}
+
+	// Validate transaction hash format (64 hex characters)
+	if len(txHash) != 64 {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "txHash must be 64 hexadecimal characters",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Check if transaction hash is valid hex
+	if !isHexString(txHash) {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "txHash must be hexadecimal",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Load existing seed nodes file
+	seedNodesFile := "genesis/seed-nodes.json"
+
+	// Create seed nodes config structure
+	type LicensedSeedNode struct {
+		IP            string `json:"ip"`
+		LicenseTxHash string `json:"licenseTxHash"`
+		LicenseDate   string `json:"licenseDate"`
+		Status        string `json:"status"`
+		WalletAddress string `json:"walletAddress"` // Wallet address for fee distribution
+		Name          string `json:"name,omitempty"`
+		Description   string `json:"description,omitempty"`
+	}
+
+	type SeedNodesConfig struct {
+		LicensedSeedNodes []LicensedSeedNode `json:"licensedSeedNodes"`
+		Version           string             `json:"version"`
+		LastUpdated       string             `json:"lastUpdated"`
+		Note              string             `json:"note,omitempty"`
+	}
+
+	var config SeedNodesConfig
+
+	// Try to read existing file
+	if data, err := os.ReadFile(seedNodesFile); err == nil {
+		if err := json.Unmarshal(data, &config); err != nil {
+			core.LogWarn("Failed to parse existing seed-nodes.json: %v", err)
+			// Continue with empty config
+		}
+	}
+
+	// Check if IP already exists
+	for i, node := range config.LicensedSeedNodes {
+		if node.IP == ip {
+			// Update existing entry
+			config.LicensedSeedNodes[i].LicenseTxHash = txHash
+			config.LicensedSeedNodes[i].LicenseDate = time.Now().UTC().Format(time.RFC3339)
+			config.LicensedSeedNodes[i].Status = "pending"            // Reset to pending for re-registration
+			config.LicensedSeedNodes[i].WalletAddress = walletAddress // Update wallet address
+			if name != "" {
+				config.LicensedSeedNodes[i].Name = name
+			}
+			if description != "" {
+				config.LicensedSeedNodes[i].Description = description
+			}
+
+			// Save updated config
+			config.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+			if config.Version == "" {
+				config.Version = "1.0"
+			}
+
+			if data, err := json.MarshalIndent(config, "", "  "); err == nil {
+				if err := os.WriteFile(seedNodesFile, data, 0644); err != nil {
+					core.LogError("Failed to write seed-nodes.json: %v", err)
+					return &RPCResponse{
+						JSONRPC: "2.0",
+						Error: &RPCError{
+							Code:    -32603,
+							Message: "Internal error",
+							Data:    fmt.Sprintf("Failed to save seed-nodes.json: %v", err),
+						},
+						ID: req.ID,
+					}
+				}
+			}
+
+			core.LogInfo("Updated seed node registration: IP=%s, TX=%s", ip, txHash)
+			return &RPCResponse{
+				JSONRPC: "2.0",
+				Result: map[string]interface{}{
+					"success": true,
+					"status":  "pending",
+					"message": "Seed node registration updated. Waiting for admin approval.",
+					"ip":      ip,
+				},
+				ID: req.ID,
+			}
+		}
+	}
+
+	// Add new seed node entry
+	newNode := LicensedSeedNode{
+		IP:            ip,
+		LicenseTxHash: txHash,
+		LicenseDate:   time.Now().UTC().Format(time.RFC3339),
+		Status:        "pending",     // Admin must approve
+		WalletAddress: walletAddress, // Wallet address for fee distribution
+		Name:          name,
+		Description:   description,
+	}
+
+	config.LicensedSeedNodes = append(config.LicensedSeedNodes, newNode)
+	config.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+	if config.Version == "" {
+		config.Version = "1.0"
+	}
+	if config.Note == "" {
+		config.Note = "This file contains licensed seed nodes. It is loaded in addition to genesis/testnet.json seed nodes."
+	}
+
+	// Save to file
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		core.LogError("Failed to marshal seed-nodes.json: %v", err)
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Internal error",
+				Data:    fmt.Sprintf("Failed to marshal seed-nodes.json: %v", err),
+			},
+			ID: req.ID,
+		}
+	}
+
+	if err := os.WriteFile(seedNodesFile, data, 0644); err != nil {
+		core.LogError("Failed to write seed-nodes.json: %v", err)
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Internal error",
+				Data:    fmt.Sprintf("Failed to save seed-nodes.json: %v", err),
+			},
+			ID: req.ID,
+		}
+	}
+
+	core.LogInfo("New seed node registration: IP=%s, TX=%s, Name=%s", ip, txHash, name)
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result: map[string]interface{}{
+			"success": true,
+			"status":  "pending",
+			"message": "Seed node registration successful. Waiting for admin approval.",
+			"ip":      ip,
+		},
+		ID: req.ID,
+	}
+}
+
+// handleGetSeedNodeRegistrations returns all seed node registrations for admin review
+func (s *ServerV2) handleGetSeedNodeRegistrations(req *RPCRequest) *RPCResponse {
+	seedNodesFile := "genesis/seed-nodes.json"
+
+	type LicensedSeedNode struct {
+		IP            string `json:"ip"`
+		LicenseTxHash string `json:"licenseTxHash"`
+		LicenseDate   string `json:"licenseDate"`
+		Status        string `json:"status"`
+		WalletAddress string `json:"walletAddress"` // Wallet address for fee distribution
+		Name          string `json:"name,omitempty"`
+		Description   string `json:"description,omitempty"`
+	}
+
+	type SeedNodesConfig struct {
+		LicensedSeedNodes []LicensedSeedNode `json:"licensedSeedNodes"`
+		Version           string             `json:"version"`
+		LastUpdated       string             `json:"lastUpdated"`
+		Note              string             `json:"note,omitempty"`
+	}
+
+	var config SeedNodesConfig
+
+	// Try to read existing file
+	if data, err := os.ReadFile(seedNodesFile); err == nil {
+		if err := json.Unmarshal(data, &config); err != nil {
+			core.LogWarn("Failed to parse seed-nodes.json: %v", err)
+			return &RPCResponse{
+				JSONRPC: "2.0",
+				Result:  []interface{}{},
+				ID:      req.ID,
+			}
+		}
+	} else {
+		// File doesn't exist, return empty list
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Result:  []interface{}{},
+			ID:      req.ID,
+		}
+	}
+
+	// Convert to JSON-compatible format
+	registrations := make([]map[string]interface{}, 0, len(config.LicensedSeedNodes))
+	for _, node := range config.LicensedSeedNodes {
+		registrations = append(registrations, map[string]interface{}{
+			"ip":            node.IP,
+			"licenseTxHash": node.LicenseTxHash,
+			"licenseDate":   node.LicenseDate,
+			"status":        node.Status,
+			"walletAddress": node.WalletAddress, // Include wallet address
+			"name":          node.Name,
+			"description":   node.Description,
+		})
+	}
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result:  registrations,
+		ID:      req.ID,
+	}
+}
+
+// handleUpdateSeedNodeStatus updates the status of a seed node registration
+func (s *ServerV2) handleUpdateSeedNodeStatus(req *RPCRequest) *RPCResponse {
+	params, ok := req.Params.(map[string]interface{})
+	if !ok {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+			},
+			ID: req.ID,
+		}
+	}
+
+	ip, ok := params["ip"].(string)
+	if !ok || ip == "" {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "ip parameter required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	status, ok := params["status"].(string)
+	if !ok || status == "" {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "status parameter required (active, rejected, pending)",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Validate status
+	validStatuses := map[string]bool{
+		"active":   true,
+		"rejected": true,
+		"pending":  true,
+	}
+	if !validStatuses[status] {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "status must be one of: active, rejected, pending",
+			},
+			ID: req.ID,
+		}
+	}
+
+	seedNodesFile := "genesis/seed-nodes.json"
+
+	type LicensedSeedNode struct {
+		IP            string `json:"ip"`
+		LicenseTxHash string `json:"licenseTxHash"`
+		LicenseDate   string `json:"licenseDate"`
+		Status        string `json:"status"`
+		WalletAddress string `json:"walletAddress"` // Wallet address for fee distribution
+		Name          string `json:"name,omitempty"`
+		Description   string `json:"description,omitempty"`
+	}
+
+	type SeedNodesConfig struct {
+		LicensedSeedNodes []LicensedSeedNode `json:"licensedSeedNodes"`
+		Version           string             `json:"version"`
+		LastUpdated       string             `json:"lastUpdated"`
+		Note              string             `json:"note,omitempty"`
+	}
+
+	var config SeedNodesConfig
+
+	// Try to read existing file
+	if data, err := os.ReadFile(seedNodesFile); err == nil {
+		if err := json.Unmarshal(data, &config); err != nil {
+			core.LogWarn("Failed to parse seed-nodes.json: %v", err)
+			return &RPCResponse{
+				JSONRPC: "2.0",
+				Error: &RPCError{
+					Code:    -32603,
+					Message: "Internal error",
+					Data:    "Failed to read seed-nodes.json",
+				},
+				ID: req.ID,
+			}
+		}
+	} else {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Internal error",
+				Data:    "seed-nodes.json file not found",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Optional: walletAddress parameter (for updating wallet address)
+	walletAddress, _ := params["walletAddress"].(string)
+	if walletAddress != "" {
+		// Validate wallet address format
+		if !strings.HasPrefix(walletAddress, "kalon") && !strings.HasPrefix(walletAddress, "tkalon") {
+			return &RPCResponse{
+				JSONRPC: "2.0",
+				Error: &RPCError{
+					Code:    -32602,
+					Message: "Invalid params",
+					Data:    "walletAddress must be a valid Kalon address (kalon1... or tkalon1...)",
+				},
+				ID: req.ID,
+			}
+		}
+		// Validate address format more strictly (check if AddressFromString returns non-zero address)
+		addr := core.AddressFromString(walletAddress)
+		isZero := true
+		for _, b := range addr {
+			if b != 0 {
+				isZero = false
+				break
+			}
+		}
+		if isZero {
+			return &RPCResponse{
+				JSONRPC: "2.0",
+				Error: &RPCError{
+					Code:    -32602,
+					Message: "Invalid params",
+					Data:    "walletAddress is not a valid Kalon address",
+				},
+				ID: req.ID,
+			}
+		}
+	}
+
+	// Find and update the node
+	found := false
+	for i, node := range config.LicensedSeedNodes {
+		if node.IP == ip {
+			config.LicensedSeedNodes[i].Status = status
+			// Update wallet address if provided
+			if walletAddress != "" {
+				config.LicensedSeedNodes[i].WalletAddress = walletAddress
+				core.LogInfo("Updated wallet address for seed node %s: %s", ip, walletAddress)
+			}
+			config.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    fmt.Sprintf("Seed node with IP %s not found", ip),
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Save updated config
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		core.LogError("Failed to marshal seed-nodes.json: %v", err)
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Internal error",
+				Data:    fmt.Sprintf("Failed to marshal seed-nodes.json: %v", err),
+			},
+			ID: req.ID,
+		}
+	}
+
+	if err := os.WriteFile(seedNodesFile, data, 0644); err != nil {
+		core.LogError("Failed to write seed-nodes.json: %v", err)
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Internal error",
+				Data:    fmt.Sprintf("Failed to save seed-nodes.json: %v", err),
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Reload seed node wallets in blockchain if status changed to/from active
+	if s.blockchain != nil {
+		s.blockchain.ReloadSeedNodeWallets()
+		core.LogInfo("Reloaded seed node wallets after status update")
+	}
+
+	core.LogInfo("Updated seed node status: IP=%s, Status=%s, Wallet=%s", ip, status, walletAddress)
+	result := map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("Seed node %s status updated to %s", ip, status),
+		"ip":      ip,
+		"status":  status,
+	}
+	if walletAddress != "" {
+		result["walletAddress"] = walletAddress
+		result["message"] = fmt.Sprintf("Seed node %s status updated to %s, wallet address updated", ip, status)
+	}
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result:  result,
+		ID:      req.ID,
+	}
+}
+
+// handleReloadSeedNodes reloads seed node wallets from seed-nodes.json
+func (s *ServerV2) handleReloadSeedNodes(req *RPCRequest) *RPCResponse {
+	s.mu.RLock()
+	blockchain := s.blockchain
+	s.mu.RUnlock()
+
+	if blockchain == nil {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Internal error",
+				Data:    "Blockchain not available",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Reload seed node wallets from seed-nodes.json
+	blockchain.ReloadSeedNodeWallets()
+	core.LogInfo("Reloaded seed node wallets from seed-nodes.json (via RPC)")
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result: map[string]interface{}{
+			"success": true,
+			"message": "Seed nodes reloaded successfully from seed-nodes.json",
+		},
+		ID: req.ID,
+	}
+}
+
+// handleWriteSeedNodes writes the current admin panel state to seed-nodes.json
+// This takes the current registrations (from getSeedNodeRegistrations) and writes them to the file
+func (s *ServerV2) handleWriteSeedNodes(req *RPCRequest) *RPCResponse {
+	seedNodesFile := "genesis/seed-nodes.json"
+
+	// Get current registrations (same logic as getSeedNodeRegistrations)
+	type LicensedSeedNode struct {
+		IP            string `json:"ip"`
+		LicenseTxHash string `json:"licenseTxHash"`
+		LicenseDate   string `json:"licenseDate"`
+		Status        string `json:"status"`
+		WalletAddress string `json:"walletAddress"`
+		Name          string `json:"name,omitempty"`
+		Description   string `json:"description,omitempty"`
+	}
+
+	type SeedNodesConfig struct {
+		LicensedSeedNodes []LicensedSeedNode `json:"licensedSeedNodes"`
+		Version           string             `json:"version"`
+		LastUpdated       string             `json:"lastUpdated"`
+		Note              string             `json:"note,omitempty"`
+	}
+
+	var config SeedNodesConfig
+
+	// Read current file to preserve structure
+	if data, err := os.ReadFile(seedNodesFile); err == nil {
+		if err := json.Unmarshal(data, &config); err != nil {
+			core.LogWarn("Failed to parse existing seed-nodes.json: %v", err)
+			// Continue with empty config
+		}
+	}
+
+	// If config is empty, initialize it
+	if config.Version == "" {
+		config.Version = "1.0"
+	}
+	if config.Note == "" {
+		config.Note = "This file contains licensed seed nodes. It is loaded in addition to genesis/testnet.json seed nodes."
+	}
+
+	// Update LastUpdated timestamp
+	config.LastUpdated = time.Now().UTC().Format(time.RFC3339)
+
+	// Write to file
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		core.LogError("Failed to marshal seed-nodes.json: %v", err)
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Internal error",
+				Data:    fmt.Sprintf("Failed to marshal seed-nodes.json: %v", err),
+			},
+			ID: req.ID,
+		}
+	}
+
+	if err := os.WriteFile(seedNodesFile, data, 0644); err != nil {
+		core.LogError("Failed to write seed-nodes.json: %v", err)
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Internal error",
+				Data:    fmt.Sprintf("Failed to save seed-nodes.json: %v", err),
+			},
+			ID: req.ID,
+		}
+	}
+
+	core.LogInfo("Written seed-nodes.json with %d seed nodes (via RPC)", len(config.LicensedSeedNodes))
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result: map[string]interface{}{
+			"success": true,
+			"message": fmt.Sprintf("Seed nodes written successfully to seed-nodes.json (%d nodes)", len(config.LicensedSeedNodes)),
+			"count":   len(config.LicensedSeedNodes),
+		},
+		ID: req.ID,
+	}
+}
+
+// handleGetSeedNodeStatus returns the status of all seed nodes (Synced/Unsynced/Offline)
+func (s *ServerV2) handleGetSeedNodeStatus(req *RPCRequest) *RPCResponse {
+	s.mu.RLock()
+	blockchain := s.blockchain
+	p2pNetwork := s.p2pNetwork
+	s.mu.RUnlock()
+
+	if blockchain == nil {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Internal error",
+				Data:    "Blockchain not available",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Get master node height
+	masterHeight := blockchain.GetHeight()
+
+	// Get seed node info from blockchain
+	seedNodeInfo := blockchain.GetSeedNodeInfo()
+
+	// Get peer details from P2P network
+	peerDetails := make(map[string]map[string]interface{})
+	if p2pNetwork != nil {
+		peers := p2pNetwork.GetPeerDetails()
+		for _, peer := range peers {
+			peerIP := peer["ip"].(string)
+			if host, _, err := net.SplitHostPort(peerIP); err == nil {
+				peerIP = host
+			}
+			peerDetails[peerIP] = peer
+		}
+	}
+
+	// Load seed nodes from seed-nodes.json
+	seedNodesFile := "genesis/seed-nodes.json"
+	type LicensedSeedNode struct {
+		IP            string `json:"ip"`
+		Status        string `json:"status"`
+		WalletAddress string `json:"walletAddress"`
+		Name          string `json:"name,omitempty"`
+		Description   string `json:"description,omitempty"`
+	}
+	type SeedNodesConfig struct {
+		LicensedSeedNodes []LicensedSeedNode `json:"licensedSeedNodes"`
+	}
+
+	var config SeedNodesConfig
+	if data, err := os.ReadFile(seedNodesFile); err == nil {
+		json.Unmarshal(data, &config)
+	}
+
+	// Build status for each seed node
+	seedNodeStatuses := make([]map[string]interface{}, 0)
+	for _, seedNode := range config.LicensedSeedNodes {
+		// Extract IP from "IP:PORT" format
+		seedIP := seedNode.IP
+		if host, _, err := net.SplitHostPort(seedNode.IP); err == nil {
+			seedIP = host
+		}
+
+		// Get seed node info from blockchain
+		info, exists := seedNodeInfo[seedIP]
+
+		// Get peer info
+		peer, peerConnected := peerDetails[seedIP]
+
+		// Determine status
+		status := "offline"
+		statusColor := "#ff4444" // Red
+		statusIcon := "❌"
+		heightDiff := uint64(0)
+		seedHeight := uint64(0)
+
+		if peerConnected {
+			// Peer is connected
+			// CRITICAL: Prefer blockchain seedNodeInfo over peer["height"] because:
+			// 1. seedNodeInfo is updated by monitorPeerHeights every 30 seconds
+			// 2. peer["height"] might be stale (only updated via version message)
+			// 3. seedNodeInfo reflects the actual current height from the seed node's RPC
+			if info != nil && info.Height > 0 {
+				seedHeight = info.Height
+				core.LogDebug("Using blockchain seed node height for %s: %d (from monitorPeerHeights)", seedIP, seedHeight)
+			} else {
+				// Fallback to peer["height"] if seedNodeInfo not available
+				// Height comes as float64 from JSON, convert to uint64
+				if peerHeightFloat, ok := peer["height"].(float64); ok {
+					seedHeight = uint64(peerHeightFloat)
+				} else if peerHeightUint, ok := peer["height"].(uint64); ok {
+					seedHeight = peerHeightUint
+				}
+
+				// If peer.Height is 0, use blockchain info (from monitorPeerHeights)
+				// This happens when Version-Message hasn't been received yet
+				if seedHeight == 0 && info != nil && info.Height > 0 {
+					seedHeight = info.Height
+					core.LogDebug("Using blockchain seed node height for %s: %d (peer height not yet received)", seedIP, seedHeight)
+				}
+			}
+
+			if seedHeight > masterHeight {
+				heightDiff = seedHeight - masterHeight
+			} else {
+				heightDiff = masterHeight - seedHeight
+			}
+
+			// If height is still 0, mark as "waiting for height" instead of unsynced
+			if seedHeight == 0 {
+				status = "unsynced"
+				statusColor = "#ffaa00" // Orange/Yellow
+				statusIcon = "⏳"        // Hourglass - waiting for version message
+			} else if seedNode.Status == "active" && heightDiff <= 8 {
+				// Synced: Active status and height within ±8 blocks
+				// Note: For fee eligibility, we still use ±1 block (see UpdateSeedNodeHeight in blockchain.go)
+				// This larger tolerance is only for dashboard display to account for active syncing
+				status = "synced"
+				statusColor = "#00ff00" // Green
+				statusIcon = "✅"
+			} else if seedNode.Status == "active" {
+				// Unsynced: Active but height mismatch > 8 blocks
+				status = "unsynced"
+				statusColor = "#ffaa00" // Orange/Yellow
+				statusIcon = "⚠️"
+			} else {
+				// Pending/Rejected but connected
+				status = "unsynced"
+				statusColor = "#ffaa00"
+				statusIcon = "⚠️"
+			}
+		} else if exists && info != nil {
+			// Not connected but exists in blockchain (was connected before)
+			seedHeight = info.Height
+			if seedHeight > masterHeight {
+				heightDiff = seedHeight - masterHeight
+			} else {
+				heightDiff = masterHeight - seedHeight
+			}
+			status = "offline"
+			statusColor = "#ff4444"
+			statusIcon = "❌"
+		}
+
+		seedNodeStatuses = append(seedNodeStatuses, map[string]interface{}{
+			"ip":              seedNode.IP,
+			"name":            seedNode.Name,
+			"walletAddress":   seedNode.WalletAddress,
+			"status":          seedNode.Status, // Registration status (active/pending/rejected)
+			"syncStatus":      status,          // Sync status (synced/unsynced/offline)
+			"syncStatusIcon":  statusIcon,
+			"syncStatusColor": statusColor,
+			"height":          seedHeight,
+			"masterHeight":    masterHeight,
+			"heightDiff":      heightDiff,
+			"connected":       peerConnected,
+			"lastChecked": func() string {
+				if info != nil {
+					return info.LastChecked.Format(time.RFC3339)
+				}
+				return ""
+			}(),
+		})
+	}
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result: map[string]interface{}{
+			"seedNodes":    seedNodeStatuses,
+			"masterHeight": masterHeight,
+			"totalNodes":   len(seedNodeStatuses),
+		},
+		ID: req.ID,
 	}
 }
 
@@ -2224,6 +3241,21 @@ func (s *ServerV2) handleGetAddressTransactions(req *RPCRequest) *RPCResponse {
 			"fee":       tx.Fee,
 			"timestamp": tx.Timestamp.Unix(),
 		}
+
+		// Find block hash for this transaction
+		blockHash := s.blockchain.FindBlockHashForTransaction(tx.Hash)
+
+		// Add block hash and number if found
+		if blockHash != (core.Hash{}) {
+			txMap["blockHash"] = hex.EncodeToString(blockHash[:])
+
+			// Get block number from block hash
+			block, err := s.blockchain.GetBlockByHash(blockHash[:])
+			if err == nil && block != nil {
+				txMap["blockNumber"] = block.Header.Number
+			}
+		}
+
 		txList = append(txList, txMap)
 	}
 
