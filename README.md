@@ -30,6 +30,14 @@ chmod +x install.sh
 
 ### Step 5: Start Mining
 
+**Option 1: Using systemd service (Recommended for production)**
+```bash
+# If systemd service is configured:
+sudo systemctl start kalon-miner
+sudo systemctl enable kalon-miner  # Auto-start on boot
+```
+
+**Option 2: Using nohup (For testing or if no systemd service)**
 ```bash
 nohup ./build/kalon-miner-v2 \
   --wallet YOUR_WALLET_ADDRESS \
@@ -39,6 +47,8 @@ nohup ./build/kalon-miner-v2 \
 ```
 
 **Replace `YOUR_WALLET_ADDRESS` with your actual wallet address from Step 4!**
+
+**Note**: For production use, systemd service is recommended as it provides better process management and automatic restarts.
 
 **Important Notes**: 
 - Community members **do NOT need their own node** - use the public RPC endpoint: `https://explorer.kalon-network.com/rpc`
@@ -343,11 +353,13 @@ nohup ./build/kalon-miner-v2 \
 ## 📞 Support
 
 For issues and questions:
-- Check miner logs: 
+- Check miner logs:
   - If using systemd: `journalctl -u kalon-miner -f`
-  - If using nohup: `tail -f logs/miner.log`
+  - If using nohup: `tail -f logs/miner.log` or `./miner-logs.sh`
 - Verify RPC endpoint is accessible: `curl https://explorer.kalon-network.com/rpc`
-- Check miner status: `sudo systemctl status kalon-miner` or `./miner-status.sh`
+- Check miner status:
+  - If using systemd: `sudo systemctl status kalon-miner`
+  - If using nohup: `./miner-status.sh`
 - Review this README
 - Ensure wallet file exists and is correct
 
