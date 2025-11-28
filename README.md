@@ -30,14 +30,7 @@ chmod +x install.sh
 
 ### Step 5: Start Mining
 
-**Option 1: Using systemd service (Recommended for production)**
-```bash
-# If systemd service is configured:
-sudo systemctl start kalon-miner
-sudo systemctl enable kalon-miner  # Auto-start on boot
-```
-
-**Option 2: Using nohup (For testing or if no systemd service)**
+**Start mining with nohup (Recommended for community miners):**
 ```bash
 nohup ./build/kalon-miner-v2 \
   --wallet YOUR_WALLET_ADDRESS \
@@ -48,7 +41,14 @@ nohup ./build/kalon-miner-v2 \
 
 **Replace `YOUR_WALLET_ADDRESS` with your actual wallet address from Step 4!**
 
-**Note**: For production use, systemd service is recommended as it provides better process management and automatic restarts.
+**Note**: 
+- The miner will run in the background and continue after SSH disconnect
+- Check status: `./miner-status.sh`
+- View logs: `./miner-logs.sh`
+- Stop miner: `pkill -f kalon-miner-v2`
+
+**For production with systemd service** (advanced users):
+If you want to use systemd, you need to create a service file first with your wallet address and parameters. See the "Advanced: systemd Service" section below.
 
 **Important Notes**: 
 - Community members **do NOT need their own node** - use the public RPC endpoint: `https://explorer.kalon-network.com/rpc`
@@ -125,15 +125,7 @@ This will:
 
 #### Start Miner
 
-**Option 1: Using systemd service (Recommended for production)**
-```bash
-# If systemd service is configured:
-sudo systemctl start kalon-miner
-sudo systemctl enable kalon-miner  # Auto-start on boot
-sudo systemctl status kalon-miner   # Check status
-```
-
-**Option 2: Using nohup (For testing or if no systemd service)**
+**Start mining with nohup (Recommended - simple and works immediately):**
 ```bash
 nohup ./build/kalon-miner-v2 \
   --wallet YOUR_WALLET_ADDRESS \
@@ -142,12 +134,15 @@ nohup ./build/kalon-miner-v2 \
   > logs/miner.log 2>&1 &
 ```
 
+**Replace `YOUR_WALLET_ADDRESS` with your actual wallet address!**
+
 This will:
 - Start miner in background using nohup
 - Save logs to `logs/miner.log`
 - Continue running after SSH disconnect
 
-**Note**: For production use, systemd service is recommended as it provides better process management and automatic restarts.
+**Advanced: Using systemd service (requires service file creation)**
+If you want to use systemd, you must first create a service file with your wallet address. See "Advanced: systemd Service Setup" section below for instructions.
 
 #### Check Miner Status
 ```bash
@@ -312,16 +307,14 @@ This endpoint allows you to:
   --address YOUR_ADDRESS \
   --rpc https://explorer.kalon-network.com/rpc
 
-# Start mining (using systemd service if available, otherwise nohup)
-# Option 1: systemd service (recommended)
-sudo systemctl start kalon-miner
-
-# Option 2: nohup (for testing)
+# Start mining (using nohup - simple and works immediately)
 nohup ./build/kalon-miner-v2 \
   --wallet YOUR_ADDRESS \
   --threads 2 \
   --rpc https://explorer.kalon-network.com/rpc \
   > logs/miner.log 2>&1 &
+
+# For systemd service, see "Advanced: systemd Service Setup" section above
 
 # Check miner status
 ./miner-status.sh
