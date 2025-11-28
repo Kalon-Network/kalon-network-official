@@ -260,9 +260,10 @@ type GovernanceParameters struct {
 
 // BlockReward represents block reward distribution
 type BlockReward struct {
-	MinerReward    uint64 `json:"minerReward"`
-	TreasuryReward uint64 `json:"treasuryReward"`
-	TotalReward    uint64 `json:"totalReward"`
+	MinerReward     uint64            `json:"minerReward"`
+	TreasuryReward  uint64            `json:"treasuryReward"`
+	SeedNodeRewards map[string]uint64 `json:"seedNodeRewards,omitempty"` // Map: wallet address -> reward amount
+	TotalReward     uint64            `json:"totalReward"`
 }
 
 // TreasuryBalance represents treasury balance information
@@ -428,7 +429,11 @@ func (g *GenesisConfig) GetCurrentReward(height uint64) float64 {
 }
 
 // CalculateNetworkFees calculates network fees for a block
-func (g *GenesisConfig) CalculateNetworkFees(blockReward float64, txFees uint64) BlockReward {
+// seedNodeWallets: map of wallet addresses for active seed nodes (wallet address -> true)
+// Returns BlockReward with SeedNodeRewards map (wallet address -> reward amount)
+// IMPORTANT: Transaction fees go ONLY to Seed Nodes (80%) and Treasury (20%)
+// Miner gets NO transaction fees - only block rewards (5 tKALON)
+func (g *GenesisConfig) CalculateNetworkFees(blockReward float64, txFees uint64, seedNodeWallets map[string]bool) BlockReward {
 	totalReward := uint64(blockReward * 1000000) // Convert to micro-KALON
 
 	// Block fee (percentage of block reward)
@@ -436,14 +441,42 @@ func (g *GenesisConfig) CalculateNetworkFees(blockReward float64, txFees uint64)
 	treasuryFromBlock := uint64(float64(totalReward) * blockFeeRate)
 	minerFromBlock := totalReward - treasuryFromBlock
 
-	// Transaction fees
-	txFeeShareTreasury := g.NetworkFee.TxFeeShareTreasury
+	// Transaction fees distribution (ONLY Seed Nodes and Treasury):
+	// - Seed Nodes: 80% (shared equally among active seed nodes on same height)
+	// - Treasury: 20%
+	// - Miner: 0% (Miner gets NO transaction fees, only block rewards)
+	txFeeShareTreasury := g.NetworkFee.TxFeeShareTreasury // 0.20 (20%)
+	seedNodeShare := 0.80                                 // 80% to seed nodes
+
 	treasuryFromTx := uint64(float64(txFees) * txFeeShareTreasury)
-	minerFromTx := txFees - treasuryFromTx
+	seedNodeTotalFees := uint64(float64(txFees) * seedNodeShare)
+
+	// Distribute seed node fees equally among active seed nodes
+	seedNodeRewards := make(map[string]uint64)
+	if len(seedNodeWallets) > 0 && seedNodeTotalFees > 0 {
+		rewardPerNode := seedNodeTotalFees / uint64(len(seedNodeWallets))
+		// Distribute remainder to first node if there's a remainder
+		remainder := seedNodeTotalFees % uint64(len(seedNodeWallets))
+		firstNode := true
+		for walletAddr := range seedNodeWallets {
+			reward := rewardPerNode
+			if firstNode && remainder > 0 {
+				reward += remainder
+				firstNode = false
+			}
+			if reward > 0 {
+				seedNodeRewards[walletAddr] = reward
+			}
+		}
+	} else {
+		// If no eligible seed nodes, add their share to treasury
+		treasuryFromTx += seedNodeTotalFees
+	}
 
 	return BlockReward{
-		MinerReward:    minerFromBlock + minerFromTx,
-		TreasuryReward: treasuryFromBlock + treasuryFromTx,
-		TotalReward:    totalReward + txFees,
+		MinerReward:     minerFromBlock, // Miner gets ONLY block reward, NO transaction fees
+		TreasuryReward:  treasuryFromBlock + treasuryFromTx,
+		SeedNodeRewards: seedNodeRewards,
+		TotalReward:     totalReward + txFees,
 	}
 }
