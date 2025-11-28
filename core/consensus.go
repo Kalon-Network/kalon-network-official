@@ -463,7 +463,11 @@ func (cm *ConsensusManager) CalculateMerkleRoot(txs []Transaction) Hash {
 // CalculateBlockReward calculates the block reward distribution
 func (cm *ConsensusManager) CalculateBlockReward(height uint64, txFees uint64) BlockReward {
 	baseReward := cm.genesis.GetCurrentReward(height)
-	return cm.genesis.CalculateNetworkFees(baseReward, txFees)
+	// CalculateNetworkFees now requires seedNodeWallets map, but this function is used
+	// in contexts where we don't have seed node info. Pass empty map - actual distribution
+	// happens in blockchain.go where seed node info is available.
+	emptySeedNodeWallets := make(map[string]bool)
+	return cm.genesis.CalculateNetworkFees(baseReward, txFees, emptySeedNodeWallets)
 }
 
 // IsLaunchGuardActive checks if launch guard is still active
