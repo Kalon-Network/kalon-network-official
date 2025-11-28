@@ -125,7 +125,7 @@ mkdir -p build
 
 # Build miner
 print_info "Building kalon-miner-v2..."
-go build -o build/kalon-miner-v2 cmd/kalon-miner-v2/main.go
+go build -o build/kalon-miner-v2 ./cmd/kalon-miner-v2
 if [ $? -eq 0 ]; then
     print_success "kalon-miner-v2 built successfully"
 else
@@ -135,7 +135,7 @@ fi
 
 # Build wallet
 print_info "Building kalon-wallet..."
-go build -o build/kalon-wallet cmd/kalon-wallet/main.go
+go build -o build/kalon-wallet ./cmd/kalon-wallet
 if [ $? -eq 0 ]; then
     print_success "kalon-wallet built successfully"
 else
