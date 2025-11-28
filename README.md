@@ -330,6 +330,48 @@ nohup ./build/kalon-miner-v2 \
   --fee 100000
 ```
 
+## 🔧 Advanced: systemd Service Setup
+
+If you want to use systemd for automatic restarts and better process management, you need to create a service file first:
+
+**Create systemd service file:**
+```bash
+sudo nano /etc/systemd/system/kalon-miner.service
+```
+
+**Add the following (replace YOUR_WALLET_ADDRESS and paths with your actual values):**
+```ini
+[Unit]
+Description=Kalon Network Miner
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/path/to/kalon-network-official
+ExecStart=/path/to/kalon-network-official/build/kalon-miner-v2 \
+  --wallet YOUR_WALLET_ADDRESS \
+  --threads 2 \
+  --rpc https://explorer.kalon-network.com/rpc
+Restart=always
+RestartSec=10
+StandardOutput=append:/path/to/kalon-network-official/logs/miner.log
+StandardError=append:/path/to/kalon-network-official/logs/miner.log
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**Then enable and start:**
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable kalon-miner
+sudo systemctl start kalon-miner
+sudo systemctl status kalon-miner
+```
+
+**Note**: For most community miners, `nohup` is simpler and works immediately without service file creation.
+
 ## 📚 More Information
 
 - **RPC API**: Full JSON-RPC interface via public endpoint: `https://explorer.kalon-network.com/rpc`
