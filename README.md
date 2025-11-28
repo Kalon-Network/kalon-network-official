@@ -125,6 +125,17 @@ This will:
 
 #### Start Miner
 
+**Option 1: Using start-miner.sh script (Easiest):**
+```bash
+# With wallet file in current directory
+./start-miner.sh
+
+# Or with explicit wallet address
+./start-miner.sh --wallet YOUR_WALLET_ADDRESS --threads 2
+```
+
+**Option 2: Using nohup directly:**
+
 **Start mining with nohup (Recommended - simple and works immediately):**
 ```bash
 nohup ./build/kalon-miner-v2 \

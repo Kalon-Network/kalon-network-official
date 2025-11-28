@@ -49,21 +49,12 @@ echo ""
 # Step 2: Build binaries
 print_info "Step 2: Building binaries..."
 
-# Create build-v2 directory
-mkdir -p build-v2
-
-# Build node
-print_info "Building kalon-node-v2..."
-if go build -o build-v2/kalon-node-v2 ./cmd/kalon-node-v2; then
-    print_success "kalon-node-v2 built successfully"
-else
-    print_error "Failed to build kalon-node-v2"
-    exit 1
-fi
+# Create build directory
+mkdir -p build
 
 # Build miner
 print_info "Building kalon-miner-v2..."
-if go build -o build-v2/kalon-miner-v2 ./cmd/kalon-miner-v2; then
+if go build -o build/kalon-miner-v2 ./cmd/kalon-miner-v2; then
     print_success "kalon-miner-v2 built successfully"
 else
     print_error "Failed to build kalon-miner-v2"
@@ -72,7 +63,7 @@ fi
 
 # Build wallet
 print_info "Building kalon-wallet..."
-if go build -o build-v2/kalon-wallet ./cmd/kalon-wallet; then
+if go build -o build/kalon-wallet ./cmd/kalon-wallet; then
     print_success "kalon-wallet built successfully"
 else
     print_error "Failed to build kalon-wallet"
@@ -80,10 +71,28 @@ else
 fi
 
 # Make binaries executable
-chmod +x build-v2/kalon-node-v2 build-v2/kalon-miner-v2 build-v2/kalon-wallet 2>/dev/null || true
+chmod +x build/kalon-miner-v2 build/kalon-wallet 2>/dev/null || true
 
 echo ""
-print_success "Update successful. Miner can be restarted."
+print_success "Update successful!"
+echo ""
+echo "════════════════════════════════════════════════════════════"
+echo "Next Steps:"
+echo "════════════════════════════════════════════════════════════"
+echo ""
+echo "If miner is running, stop it first:"
+echo "   pkill -f kalon-miner-v2"
+echo ""
+echo "Then restart with:"
+echo "   nohup ./build/kalon-miner-v2 \\"
+echo "     --wallet YOUR_WALLET_ADDRESS \\"
+echo "     --threads 2 \\"
+echo "     --rpc https://explorer.kalon-network.com/rpc \\"
+echo "     > logs/miner.log 2>&1 &"
+echo ""
+echo "   Check status: ./miner-status.sh"
+echo "   View logs: ./miner-logs.sh"
+echo "════════════════════════════════════════════════════════════"
 echo ""
 
 
