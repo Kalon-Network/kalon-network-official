@@ -58,55 +58,48 @@ If you want to use systemd, you need to create a service file first with your wa
 
 ## 🔄 Updates
 
-### Normal Update (if `./update.sh` works)
+### Recommended Update Method (Always Works)
+
+**This method always works, even after force-pushed commits:**
 
 ```bash
 # Navigate to the repository directory
 cd kalon-network-official
 
-# Run update script
-./update.sh
-```
-
-### If Update Fails with "divergent branches" Error
-
-**This can happen after force-pushed commits. Fix it with these commands:**
-
-```bash
-# Navigate to the repository directory
-cd kalon-network-official
-
-# Fix divergent branches manually
+# Fetch and reset to latest version (handles all cases including force-pushes)
 git fetch origin main
 git reset --hard origin/main
 
-# Then run update script
+# Run update script to rebuild binaries
 ./update.sh
 ```
 
-**Or use the emergency fix script (if available):**
+### Alternative: Using Update Script Directly
+
+**If you prefer to use the update script directly:**
+
 ```bash
-./fix-update.sh
+cd kalon-network-official
+./update.sh
 ```
 
-### Manual Update (Alternative)
+**Note**: If `./update.sh` fails with "divergent branches" error, use the recommended method above.
+
+### Manual Update (Without Script)
 
 ```bash
 # Navigate to the repository directory
 cd kalon-network-official
 
-# Pull latest changes (uses 'main' branch, not 'master')
-git pull origin main
-
-# Or if that fails, use:
+# Fetch and reset to latest version
 git fetch origin main
 git reset --hard origin/main
 
-# Rebuild binaries
+# Rebuild binaries manually
 ./install.sh
 ```
 
-**Note**: This repository uses the `main` branch, not `master`. Use `git pull origin main` or just `git pull`.
+**Note**: This repository uses the `main` branch, not `master`. The recommended method above always works, even with force-pushed commits.
 
 ## ✨ Features
 
