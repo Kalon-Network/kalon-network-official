@@ -39,23 +39,19 @@ print_error() {
 print_info "Step 1: Pulling latest changes from repository..."
 # Set Git configuration for automatic merging (prevents "divergent branches" error)
 git config pull.rebase false 2>/dev/null || true
-# Fetch latest changes first
-git fetch origin main
-# Reset to remote if there are local changes (for clean updates)
-if ! git diff --quiet HEAD origin/main 2>/dev/null; then
-    print_info "Local changes detected, resetting to remote main branch..."
-    git reset --hard origin/main
-    print_success "Repository reset to remote main branch"
+# Fetch latest changes first (always works, even with divergent branches)
+git fetch origin main 2>/dev/null || {
+    print_error "Failed to fetch from origin"
+    exit 1
+}
+# Always reset to remote main to handle force-pushed commits and divergent branches
+# This ensures clean updates without manual intervention
+print_info "Resetting to remote main branch for clean update..."
+if git reset --hard origin/main 2>/dev/null; then
+    print_success "Repository updated successfully (reset to remote main)"
 else
-    # Try normal pull first
-    if git pull --no-rebase origin main 2>/dev/null; then
-        print_success "Repository updated successfully"
-    else
-        # If pull fails (divergent branches), reset to remote
-        print_info "Divergent branches detected, resetting to remote main branch..."
-        git reset --hard origin/main
-        print_success "Repository reset to remote main branch"
-    fi
+    print_error "Failed to reset to remote main branch"
+    exit 1
 fi
 
 echo ""
