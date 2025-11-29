@@ -1610,8 +1610,8 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 		core.LogInfo("Signed transaction received - From: %s, To: %s, Amount: %d, Hash: %x, Inputs: %d, Outputs: %d",
 			hex.EncodeToString(tx.From[:]), hex.EncodeToString(tx.To[:]), tx.Amount, tx.Hash, len(tx.Inputs), len(tx.Outputs))
 
-		// Add to mempool
-		if err := s.blockchain.GetMempool().AddTransaction(&tx); err != nil {
+		// Add to mempool with nonce validation
+		if err := s.blockchain.AddTransactionToMempool(&tx); err != nil {
 			return &RPCResponse{
 				JSONRPC: "2.0",
 				Error: &RPCError{

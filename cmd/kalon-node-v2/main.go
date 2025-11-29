@@ -484,8 +484,11 @@ func (n *NodeV2) setupP2PIntegration() {
 			return fmt.Errorf("transaction validation failed: %v", err)
 		}
 
-		// Add transaction to mempool
-		n.blockchain.GetMempool().AddTransaction(coreTx)
+		// Add transaction to mempool with nonce validation
+		if err := n.blockchain.AddTransactionToMempool(coreTx); err != nil {
+			core.LogWarn("Failed to add transaction to mempool from peer: %v, Hash: %x", err, coreTx.Hash)
+			return fmt.Errorf("failed to add transaction to mempool: %v", err)
+		}
 		core.LogDebug("Valid transaction received from peer: %x", coreTx.Hash)
 		return nil
 	})

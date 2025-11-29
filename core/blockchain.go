@@ -477,7 +477,15 @@ func (bc *BlockchainV2) addBlockV2(block *Block) error {
 	LogDebug("addBlockV2: Processing %d transactions", len(block.Txs))
 	// Process UTXOs for all transactions in the block
 	for _, tx := range block.Txs {
-		bc.processTransactionUTXOs(&tx, block.Hash)
+		// Process UTXOs - now returns error if UTXO already spent
+		if err := bc.processTransactionUTXOs(&tx, block.Hash); err != nil {
+			bc.mu.Unlock()
+			return fmt.Errorf("failed to process UTXOs for transaction %x: %v", tx.Hash, err)
+		}
+		
+		// Update account nonces after successful UTXO processing
+		bc.updateAccountNonces(&tx)
+		
 		// Remove from mempool if it exists
 		bc.mempool.RemoveTransaction(tx.Hash)
 	}
@@ -490,7 +498,6 @@ func (bc *BlockchainV2) addBlockV2(block *Block) error {
 
 	// Update account nonces for all transactions in the block
 	LogDebug("addBlockV2: Updating account nonces")
-	bc.updateAccountNonces(block)
 	LogDebug("addBlockV2: Account nonces updated")
 
 	// CRITICAL: Update block history OUTSIDE main lock (uses separate lock)
@@ -586,11 +593,30 @@ func (bc *BlockchainV2) CreateTransaction(from Address, to Address, amount uint6
 	return tx, nil
 }
 
+// updateAccountNonces updates the nonce for an address after a transaction is processed
+func (bc *BlockchainV2) updateAccountNonces(tx *Transaction) {
+	// Skip for block reward transactions (no inputs = block reward)
+	if len(tx.Inputs) == 0 {
+		return
+	}
+
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	addressKey := hex.EncodeToString(tx.From[:])
+	// Update nonce to the transaction's nonce (which should be the next expected nonce)
+	bc.accountNonces[addressKey] = tx.Nonce
+	LogDebug("Updated nonce for address %s to %d", addressKey, tx.Nonce)
+}
+
 // processTransactionUTXOs processes UTXOs for a transaction
-func (bc *BlockchainV2) processTransactionUTXOs(tx *Transaction, blockHash Hash) {
-	// Mark input UTXOs as spent
+func (bc *BlockchainV2) processTransactionUTXOs(tx *Transaction, blockHash Hash) error {
+	// Mark input UTXOs as spent - CRITICAL: Check return value to prevent double-spending
 	for _, input := range tx.Inputs {
-		bc.utxoSet.SpendUTXO(input.PreviousTxHash, input.Index)
+		if !bc.utxoSet.SpendUTXO(input.PreviousTxHash, input.Index) {
+			// UTXO was already spent or doesn't exist - this is a critical error
+			return fmt.Errorf("UTXO already spent or not found: txHash=%x, index=%d", input.PreviousTxHash, input.Index)
+		}
 	}
 
 	// Create new UTXOs for outputs
@@ -598,6 +624,8 @@ func (bc *BlockchainV2) processTransactionUTXOs(tx *Transaction, blockHash Hash)
 		bc.utxoSet.AddUTXO(tx.Hash, uint32(i), output.Amount, output.Address, blockHash)
 		LogDebug("UTXO created - Address: %s, Amount: %d, TxHash: %x", hex.EncodeToString(output.Address[:]), output.Amount, tx.Hash)
 	}
+
+	return nil
 }
 
 // AddBlockV2 is the main function for adding blocks - ensures UTXO processing
@@ -618,6 +646,22 @@ func (bc *BlockchainV2) GetUTXOs(address Address) []*UTXO {
 // GetMempool returns the mempool
 func (bc *BlockchainV2) GetMempool() *Mempool {
 	return bc.mempool
+}
+
+// AddTransactionToMempool adds a transaction to the mempool with nonce validation
+// This is the recommended way to add transactions to the mempool
+func (bc *BlockchainV2) AddTransactionToMempool(tx *Transaction) error {
+	// Skip nonce validation for block reward transactions (no inputs = block reward)
+	isBlockReward := len(tx.Inputs) == 0
+	if !isBlockReward {
+		// Validate transaction nonce before adding to mempool
+		if err := bc.validateTransactionNonce(tx); err != nil {
+			return fmt.Errorf("nonce validation failed: %v", err)
+		}
+	}
+	
+	// Add to mempool
+	return bc.mempool.AddTransaction(tx)
 }
 
 // validateBlockV2 validates a block professionally (uses bestBlock as parent)
@@ -899,8 +943,18 @@ func (bc *BlockchainV2) reorganizeChain(newBestBlock *Block) error {
 		block := blocksToRemove[i]
 		LogDebug("   Rolling back Block #%d (%x)", block.Header.Number, block.Hash)
 
-		// For each transaction in the removed block, rollback its UTXO changes
+		// For each transaction in the removed block, rollback its UTXO changes and nonces
 		for _, tx := range block.Txs {
+			// Rollback nonce for this transaction (only for non-block-reward transactions)
+			if len(tx.Inputs) > 0 {
+				addressKey := hex.EncodeToString(tx.From[:])
+				// Decrement nonce (if it exists and matches)
+				if currentNonce, exists := bc.accountNonces[addressKey]; exists && currentNonce == tx.Nonce {
+					bc.accountNonces[addressKey] = tx.Nonce - 1
+					LogDebug("   Rolled back nonce for address %s: %d -> %d", addressKey, currentNonce, tx.Nonce-1)
+				}
+			}
+			
 			// Remove UTXOs created by this transaction (outputs)
 			// The UTXO will be removed by RemoveUTXOs(block.Hash) below
 
@@ -963,7 +1017,15 @@ func (bc *BlockchainV2) reorganizeChain(newBestBlock *Block) error {
 
 		// Process UTXOs for all transactions in the block
 		for _, tx := range block.Txs {
-			bc.processTransactionUTXOs(&tx, block.Hash)
+			// Process UTXOs - now returns error if UTXO already spent
+			if err := bc.processTransactionUTXOs(&tx, block.Hash); err != nil {
+				bc.mu.Unlock()
+				return fmt.Errorf("failed to process UTXOs for transaction %x during reorganization: %v", tx.Hash, err)
+			}
+			
+			// Update account nonces after successful UTXO processing
+			bc.updateAccountNonces(&tx)
+			
 			// Remove from mempool if it exists
 			bc.mempool.RemoveTransaction(tx.Hash)
 		}
@@ -1912,63 +1974,27 @@ func (bc *BlockchainV2) validateBlockRewards(block *Block, parent *Block) error 
 	return nil
 }
 
-// validateTransactionNonce validates that a transaction has a valid nonce
-// Nonce must be higher than the last used nonce for the sender address
+// validateTransactionNonce validates that the transaction nonce is correct
+// Nonce must be exactly one higher than the last used nonce for the sender address
 func (bc *BlockchainV2) validateTransactionNonce(tx *Transaction) error {
-	if tx == nil {
-		return fmt.Errorf("transaction is nil")
-	}
-
-	// Block reward transactions don't have nonces
-	if isBlockRewardTransaction(tx) {
+	// Skip validation for block reward transactions (no inputs = block reward)
+	if len(tx.Inputs) == 0 {
 		return nil
 	}
 
-	// Get sender address as hex string
-	senderAddr := hex.EncodeToString(tx.From[:])
-
-	// Get last used nonce for this address
 	bc.mu.RLock()
-	lastNonce, exists := bc.accountNonces[senderAddr]
-	bc.mu.RUnlock()
+	defer bc.mu.RUnlock()
 
-	// If address has no previous transactions, nonce must be 0 or 1
-	if !exists {
-		if tx.Nonce > 1 {
-			return fmt.Errorf("nonce too high for new account: expected 0 or 1, got %d", tx.Nonce)
-		}
-		return nil
-	}
+	addressKey := hex.EncodeToString(tx.From[:])
+	expectedNonce := bc.accountNonces[addressKey] + 1
 
-	// Nonce must be exactly lastNonce + 1 (strict sequential)
-	expectedNonce := lastNonce + 1
 	if tx.Nonce != expectedNonce {
-		return fmt.Errorf("invalid nonce: expected %d, got %d (address: %s)", expectedNonce, tx.Nonce, senderAddr)
+		return fmt.Errorf("invalid nonce for address %s: expected %d, got %d", addressKey, expectedNonce, tx.Nonce)
 	}
 
 	return nil
 }
 
-// updateAccountNonces updates the nonce for all addresses in a block
-// This is called after a block is successfully added to the chain
-// IMPORTANT: This function assumes the caller already holds bc.mu.Lock()
-func (bc *BlockchainV2) updateAccountNonces(block *Block) {
-	// NOTE: Lock is already held by caller (addBlockV2), so we don't need to lock again
-
-	for _, tx := range block.Txs {
-		// Skip block reward transactions
-		if isBlockRewardTransaction(&tx) {
-			continue
-		}
-
-		// Update nonce for sender address
-		senderAddr := hex.EncodeToString(tx.From[:])
-		currentNonce := bc.accountNonces[senderAddr]
-		if tx.Nonce > currentNonce {
-			bc.accountNonces[senderAddr] = tx.Nonce
-		}
-	}
-}
 
 // AddBlock adds a block to the blockchain
 func (bc *BlockchainV2) AddBlock(block *Block) error {
@@ -2045,6 +2071,16 @@ func (bc *BlockchainV2) loadChainFromStorage() {
 		// Add block to index
 		blockHashKey := hex.EncodeToString(block.Hash[:])
 		bc.blockIndex[blockHashKey] = block
+		
+		// Update account nonces from transactions in this block
+		for _, tx := range block.Txs {
+			// Skip block reward transactions (no inputs = block reward)
+			if len(tx.Inputs) > 0 {
+				addressKey := hex.EncodeToString(tx.From[:])
+				// Update nonce to the transaction's nonce
+				bc.accountNonces[addressKey] = tx.Nonce
+			}
+		}
 
 		// IMPORTANT: Reconstruct UTXOs for each block
 		// This is critical because UTXOs are in-memory and need to be rebuilt
@@ -2052,9 +2088,7 @@ func (bc *BlockchainV2) loadChainFromStorage() {
 			bc.processTransactionUTXOs(&tx, block.Hash)
 		}
 
-		// IMPORTANT: Reconstruct account nonces for each block
-		// This is critical because accountNonces are in-memory and need to be rebuilt
-		bc.updateAccountNonces(block)
+		// IMPORTANT: Account nonces are already updated above in the loop
 	}
 
 	LogInfo("Loaded blockchain from storage - Height: %d, UTXOs restored", bc.height)
