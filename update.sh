@@ -37,11 +37,25 @@ print_error() {
 
 # Step 1: Pull latest changes
 print_info "Step 1: Pulling latest changes from repository..."
-if git pull origin main; then
-    print_success "Repository updated successfully"
+# Set Git configuration for automatic merging (prevents "divergent branches" error)
+git config pull.rebase false 2>/dev/null || true
+# Fetch latest changes first
+git fetch origin main
+# Reset to remote if there are local changes (for clean updates)
+if ! git diff --quiet HEAD origin/main 2>/dev/null; then
+    print_info "Local changes detected, resetting to remote main branch..."
+    git reset --hard origin/main
+    print_success "Repository reset to remote main branch"
 else
-    print_error "Failed to pull latest changes"
-    exit 1
+    # Try normal pull first
+    if git pull --no-rebase origin main 2>/dev/null; then
+        print_success "Repository updated successfully"
+    else
+        # If pull fails (divergent branches), reset to remote
+        print_info "Divergent branches detected, resetting to remote main branch..."
+        git reset --hard origin/main
+        print_success "Repository reset to remote main branch"
+    fi
 fi
 
 echo ""
