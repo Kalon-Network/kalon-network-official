@@ -58,7 +58,38 @@ If you want to use systemd, you need to create a service file first with your wa
 
 ## 🔄 Updates
 
-To update your installation to the latest version:
+### Normal Update (if `./update.sh` works)
+
+```bash
+# Navigate to the repository directory
+cd kalon-network-official
+
+# Run update script
+./update.sh
+```
+
+### If Update Fails with "divergent branches" Error
+
+**This can happen after force-pushed commits. Fix it with these commands:**
+
+```bash
+# Navigate to the repository directory
+cd kalon-network-official
+
+# Fix divergent branches manually
+git fetch origin main
+git reset --hard origin/main
+
+# Then run update script
+./update.sh
+```
+
+**Or use the emergency fix script (if available):**
+```bash
+./fix-update.sh
+```
+
+### Manual Update (Alternative)
 
 ```bash
 # Navigate to the repository directory
@@ -67,8 +98,9 @@ cd kalon-network-official
 # Pull latest changes (uses 'main' branch, not 'master')
 git pull origin main
 
-# Or simply:
-git pull
+# Or if that fails, use:
+git fetch origin main
+git reset --hard origin/main
 
 # Rebuild binaries
 ./install.sh
