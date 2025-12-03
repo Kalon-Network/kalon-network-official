@@ -298,12 +298,27 @@ func handleExport(wm *WalletManager, args []string) {
 	fmt.Println(string(jsonData))
 }
 
+// getDefaultRPC returns the default RPC URL from environment or uses Explorer
+func getDefaultRPC() string {
+	// Check environment variable first
+	if envRPC := os.Getenv("KALON_RPC_URL"); envRPC != "" {
+		return envRPC
+	}
+	// Default to Explorer RPC
+	return "https://explorer.kalon-network.com/rpc"
+}
+
 // handleBalance handles balance queries
 func handleBalance(wm *WalletManager, args []string) {
 	fs := flag.NewFlagSet("balance", flag.ExitOnError)
 	address := fs.String("address", "", "Address to check balance")
-	rpcURL := fs.String("rpc", "http://localhost:16314", "RPC server URL")
+	rpcURL := fs.String("rpc", "", "RPC server URL (default: from KALON_RPC_URL env or https://explorer.kalon-network.com/rpc)")
 	fs.Parse(args)
+
+	// Use default RPC if not provided
+	if *rpcURL == "" {
+		*rpcURL = getDefaultRPC()
+	}
 
 	// Get address
 	var targetAddress string
@@ -322,7 +337,7 @@ func handleBalance(wm *WalletManager, args []string) {
 	// Query balance via RPC
 	balanceMicro, err := queryBalance(*rpcURL, targetAddress)
 	if err != nil {
-		log.Fatalf("Failed to query balance: %v", err)
+		log.Fatalf("Failed to query balance: %v\nHint: You can set KALON_RPC_URL environment variable or use --rpc flag", err)
 	}
 
 	// Convert to tKALON for display
@@ -441,12 +456,12 @@ func handleSend(wm *WalletManager, args []string) {
 	toFlag := fs.String("to", "", "Recipient address or wallet file")
 	amountFlag := fs.Uint64("amount", 0, "Amount to send (micro-KALON)")
 	feeFlag := fs.Uint64("fee", 0, "Transaction fee (micro-KALON, default: 100000)")
-	rpcURLFlag := fs.String("rpc", "", "RPC server URL (default: https://explorer.kalon-network.com/rpc)")
+	rpcURLFlag := fs.String("rpc", "", "RPC server URL (default: from KALON_RPC_URL env or https://explorer.kalon-network.com/rpc)")
 	fs.Parse(args)
 
 	reader := bufio.NewReader(os.Stdin)
-	defaultRPC := "https://explorer.kalon-network.com/rpc"
-	rpcURL := defaultRPC
+	// Use default RPC if not provided
+	rpcURL := getDefaultRPC()
 	if *rpcURLFlag != "" {
 		rpcURL = *rpcURLFlag
 	}
@@ -643,6 +658,15 @@ func loadWallet(filename string) (*WalletInfo, error) {
 
 // queryBalance queries balance via RPC
 func queryBalance(rpcURL, address string) (uint64, error) {
+	// Ensure RPC URL has /rpc endpoint if it's a base URL
+	if !strings.HasSuffix(rpcURL, "/rpc") {
+		if !strings.HasSuffix(rpcURL, "/") {
+			rpcURL += "/rpc"
+		} else {
+			rpcURL += "rpc"
+		}
+	}
+
 	// Create RPC request
 	req := RPCRequest{
 		JSONRPC: "2.0",
