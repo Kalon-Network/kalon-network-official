@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -37,6 +38,20 @@ type BlockchainV2 struct {
 	seedNodeInfo map[string]*SeedNodeInfo // Key: IP address, Value: seed node info
 	// Account nonces: Map of address -> last used nonce (for transaction nonce validation)
 	accountNonces map[string]uint64 // Key: hex-encoded address, Value: last used nonce
+	// Deployed tokens: Map of token name -> TokenInfo (for token deployment system)
+	deployedTokens map[string]*TokenInfo // Key: token name (lowercase), Value: token info
+	// Token balances: Map of address+tokenName -> balance (for token transfer system)
+	tokenBalances map[string]uint64 // Key: "address:tokenName" (lowercase), Value: token balance
+}
+
+// TokenInfo represents information about a deployed token
+type TokenInfo struct {
+	Name         string    `json:"name"`
+	Description  string    `json:"description"`
+	TotalSupply  uint64    `json:"totalSupply"`
+	Creator      string    `json:"creator"`      // Wallet address of creator
+	DeployTime   time.Time `json:"deployTime"`   // Timestamp of deployment
+	DeployHeight uint64    `json:"deployHeight"` // Block height when deployed
 }
 
 // SeedNodeInfo contains information about a seed node
@@ -140,6 +155,8 @@ func NewBlockchainV2(genesis *GenesisConfig, persister BlockPersister) *Blockcha
 		seedNodeWallets: make(map[string]bool),          // Initialize seed node wallets map
 		seedNodeInfo:    make(map[string]*SeedNodeInfo), // Initialize seed node info map
 		accountNonces:   make(map[string]uint64),        // Initialize account nonces map
+		deployedTokens:  make(map[string]*TokenInfo),    // Initialize deployed tokens map
+		tokenBalances:   make(map[string]uint64),        // Initialize token balances map
 	}
 
 	// Load seed node wallets from seed-nodes.json
@@ -482,10 +499,10 @@ func (bc *BlockchainV2) addBlockV2(block *Block) error {
 			bc.mu.Unlock()
 			return fmt.Errorf("failed to process UTXOs for transaction %x: %v", tx.Hash, err)
 		}
-		
+
 		// Update account nonces after successful UTXO processing
 		bc.updateAccountNonces(&tx)
-		
+
 		// Remove from mempool if it exists
 		bc.mempool.RemoveTransaction(tx.Hash)
 	}
@@ -536,6 +553,12 @@ func (bc *BlockchainV2) addBlockV2(block *Block) error {
 // CreateTransaction creates a transaction from UTXOs
 // Note: Transaction must be signed separately using crypto.SignTransaction()
 func (bc *BlockchainV2) CreateTransaction(from Address, to Address, amount uint64, fee uint64) (*Transaction, error) {
+	return bc.CreateTransactionWithData(from, to, amount, fee, nil)
+}
+
+// CreateTransactionWithData creates a transaction from UTXOs with optional data field
+// Note: Transaction must be signed separately using crypto.SignTransaction()
+func (bc *BlockchainV2) CreateTransactionWithData(from Address, to Address, amount uint64, fee uint64, data []byte) (*Transaction, error) {
 	// Get UTXOs for sender
 	utxos := bc.utxoSet.GetUTXOs(from)
 
@@ -575,12 +598,23 @@ func (bc *BlockchainV2) CreateTransaction(from Address, to Address, amount uint6
 		outputs = append(outputs, TxOutput{Address: from, Amount: change})
 	}
 
+	// Get nonce for sender
+	fromKey := hex.EncodeToString(from[:])
+	bc.mu.RLock()
+	lastNonce := bc.accountNonces[fromKey]
+	bc.mu.RUnlock()
+	nextNonce := lastNonce + 1
+
 	// Create transaction
 	tx := &Transaction{
 		From:      from,
 		To:        to,
 		Amount:    amount,
+		Nonce:     nextNonce,
 		Fee:       fee,
+		GasUsed:   1,
+		GasPrice:  fee,  // Gas price = fee for simplicity
+		Data:      data, // Optional data field (for token deployments, etc.)
 		Timestamp: time.Now(),
 		Inputs:    inputs,
 		Outputs:   outputs,
@@ -611,6 +645,11 @@ func (bc *BlockchainV2) updateAccountNonces(tx *Transaction) {
 
 // processTransactionUTXOs processes UTXOs for a transaction
 func (bc *BlockchainV2) processTransactionUTXOs(tx *Transaction, blockHash Hash) error {
+	// Process token transfers if this is a token transfer transaction
+	if err := bc.processTokenTransfer(tx); err != nil {
+		return fmt.Errorf("failed to process token transfer: %v", err)
+	}
+
 	// Mark input UTXOs as spent - CRITICAL: Check return value to prevent double-spending
 	for _, input := range tx.Inputs {
 		if !bc.utxoSet.SpendUTXO(input.PreviousTxHash, input.Index) {
@@ -625,6 +664,146 @@ func (bc *BlockchainV2) processTransactionUTXOs(tx *Transaction, blockHash Hash)
 		LogDebug("UTXO created - Address: %s, Amount: %d, TxHash: %x", hex.EncodeToString(output.Address[:]), output.Amount, tx.Hash)
 	}
 
+	return nil
+}
+
+// processTokenDeployment processes a token deployment transaction
+// Token deployment data is stored in Transaction.Data as JSON: {"type":"token_deployment","tokenName":"...","totalSupply":...}
+// This is called during chain loading to restore deployed tokens
+func (bc *BlockchainV2) processTokenDeployment(tx *Transaction, blockHeight uint64) {
+	// Fast path: Check if this could be a token deployment transaction
+	if len(tx.Data) == 0 {
+		return // Not a token deployment
+	}
+
+	// Quick check: Token deployments must have "token_deployment" in data
+	dataStr := string(tx.Data)
+	maxCheckLen := 50
+	if len(dataStr) < maxCheckLen {
+		maxCheckLen = len(dataStr)
+	}
+	if !strings.Contains(dataStr[:maxCheckLen], "token_deployment") {
+		return // Not a token deployment (fast path)
+	}
+
+	// Parse token deployment data
+	var tokenData map[string]interface{}
+	if err := json.Unmarshal(tx.Data, &tokenData); err != nil {
+		return // Not valid JSON, probably not a token deployment
+	}
+
+	// Check if it's a token deployment
+	txType, ok := tokenData["type"].(string)
+	if !ok || txType != "token_deployment" {
+		return // Not a token deployment
+	}
+
+	// Extract token deployment parameters
+	tokenName, nameOk := tokenData["tokenName"].(string)
+	description, _ := tokenData["description"].(string)
+	totalSupplyFloat, supplyOk := tokenData["totalSupply"].(float64)
+
+	if !nameOk || tokenName == "" || !supplyOk || totalSupplyFloat <= 0 {
+		return // Invalid token deployment data
+	}
+
+	totalSupply := uint64(totalSupplyFloat)
+	creatorAddr := hex.EncodeToString(tx.From[:])
+	tokenNameLower := strings.ToLower(tokenName)
+
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	// Only restore if not already exists (avoid duplicates during loading)
+	if _, exists := bc.deployedTokens[tokenNameLower]; !exists {
+		tokenInfo := &TokenInfo{
+			Name:         tokenName,
+			Description:  description,
+			TotalSupply:  totalSupply,
+			Creator:      creatorAddr,
+			DeployTime:   tx.Timestamp,
+			DeployHeight: blockHeight,
+		}
+		bc.deployedTokens[tokenNameLower] = tokenInfo
+
+		// Initialize token balance for creator (gets total supply)
+		tokenKey := fmt.Sprintf("%s:%s", strings.ToLower(creatorAddr), tokenNameLower)
+		bc.tokenBalances[tokenKey] = totalSupply
+
+		LogDebug("Token deployment restored: %s (Creator: %s, Supply: %d)", tokenName, creatorAddr, totalSupply)
+	}
+}
+
+// processTokenTransfer processes a token transfer transaction
+// Token transfer data is stored in Transaction.Data as JSON: {"type":"token_transfer","tokenName":"...","amount":...}
+// PERFORMANCE: Early return if not a token transfer (no JSON parsing overhead for normal transactions)
+func (bc *BlockchainV2) processTokenTransfer(tx *Transaction) error {
+	// Fast path: Check if this could be a token transfer transaction
+	if len(tx.Data) == 0 {
+		return nil // Not a token transfer
+	}
+
+	// Quick check: Token transfers must have "token_transfer" in data (first ~50 bytes)
+	// This avoids full JSON parsing for most transactions
+	dataStr := string(tx.Data)
+	maxCheckLen := 50
+	if len(dataStr) < maxCheckLen {
+		maxCheckLen = len(dataStr)
+	}
+	if !strings.Contains(dataStr[:maxCheckLen], "token_transfer") {
+		return nil // Not a token transfer (fast path)
+	}
+
+	// Parse token transfer data (only if fast check passed)
+	var tokenData map[string]interface{}
+	if err := json.Unmarshal(tx.Data, &tokenData); err != nil {
+		return nil // Not valid JSON, probably not a token transfer
+	}
+
+	// Check if it's a token transfer
+	txType, ok := tokenData["type"].(string)
+	if !ok || txType != "token_transfer" {
+		return nil // Not a token transfer
+	}
+
+	// Extract token transfer parameters
+	tokenName, ok := tokenData["tokenName"].(string)
+	if !ok || tokenName == "" {
+		return fmt.Errorf("invalid token transfer: missing tokenName")
+	}
+
+	amountFloat, ok := tokenData["amount"].(float64)
+	if !ok || amountFloat <= 0 {
+		return fmt.Errorf("invalid token transfer: missing or invalid amount")
+	}
+	amount := uint64(amountFloat)
+
+	// Get addresses
+	fromAddr := hex.EncodeToString(tx.From[:])
+	toAddr := hex.EncodeToString(tx.To[:])
+
+	// Validate token exists
+	tokenNameLower := strings.ToLower(tokenName)
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	if _, exists := bc.deployedTokens[tokenNameLower]; !exists {
+		return fmt.Errorf("token '%s' does not exist", tokenName)
+	}
+
+	// Check sender balance
+	fromKey := fmt.Sprintf("%s:%s", strings.ToLower(fromAddr), tokenNameLower)
+	fromBalance := bc.tokenBalances[fromKey]
+	if fromBalance < amount {
+		return fmt.Errorf("insufficient token balance: need %d, have %d", amount, fromBalance)
+	}
+
+	// Transfer tokens
+	bc.tokenBalances[fromKey] -= amount
+	toKey := fmt.Sprintf("%s:%s", strings.ToLower(toAddr), tokenNameLower)
+	bc.tokenBalances[toKey] += amount
+
+	LogInfo("Token transfer processed: %d '%s' from %s to %s (tx: %x)", amount, tokenName, fromAddr, toAddr, tx.Hash)
 	return nil
 }
 
@@ -659,7 +838,7 @@ func (bc *BlockchainV2) AddTransactionToMempool(tx *Transaction) error {
 			return fmt.Errorf("nonce validation failed: %v", err)
 		}
 	}
-	
+
 	// Add to mempool
 	return bc.mempool.AddTransaction(tx)
 }
@@ -759,8 +938,9 @@ func (bc *BlockchainV2) validateBlockV2WithParent(block *Block, parent *Block) e
 	for i, tx := range block.Txs {
 		// Skip nonce validation for block reward transactions
 		if !isBlockRewardTransaction(&tx) {
-			// Validate transaction nonce (prevents replay attacks)
-			if err := bc.validateTransactionNonce(&tx); err != nil {
+			// Validate transaction nonce to prevent replay attacks
+			// Use unsafe version since we're already inside addBlockV2 which holds the lock
+			if err := bc.validateTransactionNonceUnsafe(&tx); err != nil {
 				return fmt.Errorf("invalid transaction %d nonce: %v", i, err)
 			}
 		}
@@ -954,7 +1134,7 @@ func (bc *BlockchainV2) reorganizeChain(newBestBlock *Block) error {
 					LogDebug("   Rolled back nonce for address %s: %d -> %d", addressKey, currentNonce, tx.Nonce-1)
 				}
 			}
-			
+
 			// Remove UTXOs created by this transaction (outputs)
 			// The UTXO will be removed by RemoveUTXOs(block.Hash) below
 
@@ -1022,10 +1202,10 @@ func (bc *BlockchainV2) reorganizeChain(newBestBlock *Block) error {
 				bc.mu.Unlock()
 				return fmt.Errorf("failed to process UTXOs for transaction %x during reorganization: %v", tx.Hash, err)
 			}
-			
+
 			// Update account nonces after successful UTXO processing
 			bc.updateAccountNonces(&tx)
-			
+
 			// Remove from mempool if it exists
 			bc.mempool.RemoveTransaction(tx.Hash)
 		}
@@ -1180,6 +1360,186 @@ func (bc *BlockchainV2) GetTreasuryBalance() uint64 {
 	}
 	treasuryAddr := AddressFromString(bc.genesis.TreasuryAddress)
 	return bc.GetBalance(treasuryAddr)
+}
+
+// CheckTokenName checks if a token name is already taken (case-insensitive)
+func (bc *BlockchainV2) CheckTokenName(name string) bool {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	// Convert to lowercase for case-insensitive comparison
+	nameLower := strings.ToLower(name)
+	_, exists := bc.deployedTokens[nameLower]
+	return !exists // Returns true if name is available (doesn't exist)
+}
+
+// DeployToken deploys a new token (stores token info)
+// Returns treasury address for payment (user must send 10 KALON = 10,000,000 micro-KALON)
+func (bc *BlockchainV2) DeployToken(name, description string, totalSupply uint64, creator string) (string, error) {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+
+	// Validate name
+	nameLower := strings.ToLower(name)
+	if len(name) < 2 || len(name) > 50 {
+		return "", fmt.Errorf("token name must be between 2 and 50 characters")
+	}
+
+	// Check if name already exists
+	if _, exists := bc.deployedTokens[nameLower]; exists {
+		return "", fmt.Errorf("token name '%s' already exists", name)
+	}
+
+	// Create token info
+	tokenInfo := &TokenInfo{
+		Name:         name,
+		Description:  description,
+		TotalSupply:  totalSupply,
+		Creator:      creator,
+		DeployTime:   time.Now(),
+		DeployHeight: bc.height,
+	}
+
+	// Store token info
+	bc.deployedTokens[nameLower] = tokenInfo
+
+	// Return treasury address for payment
+	treasuryAddr := bc.genesis.TreasuryAddress
+	if treasuryAddr == "" {
+		return "", fmt.Errorf("treasury address not configured")
+	}
+
+	LogInfo("Token '%s' deployment initiated by %s. User must send 10 KALON to treasury: %s", name, creator, treasuryAddr)
+
+	// Initialize token balance for creator (gets total supply)
+	tokenKey := fmt.Sprintf("%s:%s", strings.ToLower(creator), nameLower)
+	bc.tokenBalances[tokenKey] = totalSupply
+
+	LogInfo("Token '%s' deployed - Creator: %s, Total Supply: %d", name, creator, totalSupply)
+
+	// Return treasury address (user will create transaction to this address)
+	return treasuryAddr, nil
+}
+
+// GetTokenBalance returns the token balance for an address
+func (bc *BlockchainV2) GetTokenBalance(address, tokenName string) uint64 {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	tokenKey := fmt.Sprintf("%s:%s", strings.ToLower(address), strings.ToLower(tokenName))
+	return bc.tokenBalances[tokenKey]
+}
+
+// CreateTokenTransferTransaction creates a transaction for token transfer
+// This creates a transaction that must be signed and sent via sendTransaction
+func (bc *BlockchainV2) CreateTokenTransferTransaction(from, to Address, tokenName string, amount uint64, fee uint64) (*Transaction, error) {
+	// Validate token exists
+	tokenNameLower := strings.ToLower(tokenName)
+	bc.mu.RLock()
+	if _, exists := bc.deployedTokens[tokenNameLower]; !exists {
+		bc.mu.RUnlock()
+		return nil, fmt.Errorf("token '%s' does not exist", tokenName)
+	}
+	bc.mu.RUnlock()
+
+	// Check sender balance
+	fromStr := hex.EncodeToString(from[:])
+	fromBalance := bc.GetTokenBalance(fromStr, tokenName)
+	if fromBalance < amount {
+		return nil, fmt.Errorf("insufficient token balance: need %d, have %d", amount, fromBalance)
+	}
+
+	// Create token transfer data
+	tokenData := map[string]interface{}{
+		"type":      "token_transfer",
+		"tokenName": tokenName,
+		"amount":    amount,
+	}
+	dataBytes, err := json.Marshal(tokenData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal token data: %v", err)
+	}
+
+	// Get UTXOs for sender (for transaction fee)
+	utxos := bc.utxoSet.GetUTXOs(from)
+	totalBalance := uint64(0)
+	for _, utxo := range utxos {
+		totalBalance += utxo.Amount
+	}
+
+	if totalBalance < fee {
+		return nil, fmt.Errorf("insufficient balance for fee: need %d, have %d", fee, totalBalance)
+	}
+
+	// Create inputs for fee payment
+	inputs := []TxInput{}
+	totalInput := uint64(0)
+	for _, utxo := range utxos {
+		if totalInput >= fee {
+			break
+		}
+		inputs = append(inputs, TxInput{
+			PreviousTxHash: utxo.TxHash,
+			Index:          utxo.Index,
+			Signature:      []byte{}, // Signature will be added using crypto.SignTransaction()
+		})
+		totalInput += utxo.Amount
+	}
+
+	// Create outputs (only for fee change, token transfer is in Data field)
+	outputs := []TxOutput{}
+	change := totalInput - fee
+	if change > 0 {
+		outputs = append(outputs, TxOutput{Address: from, Amount: change})
+	}
+
+	// Get nonce for sender
+	fromKey := hex.EncodeToString(from[:])
+	bc.mu.RLock()
+	lastNonce := bc.accountNonces[fromKey]
+	bc.mu.RUnlock()
+	nextNonce := lastNonce + 1
+
+	// Create transaction
+	// GasUsed = 1 (standard for token transfers)
+	// GasPrice = fee / GasUsed (to satisfy fee = gasUsed * gasPrice validation)
+	gasUsed := uint64(1)
+	gasPrice := fee / gasUsed
+	if gasPrice == 0 {
+		gasPrice = fee // Fallback if fee is very small
+	}
+
+	tx := &Transaction{
+		From:      from,
+		To:        to, // Recipient address for token transfer
+		Amount:    0,  // No KALON transfer, only token transfer
+		Nonce:     nextNonce,
+		Fee:       fee,
+		GasUsed:   gasUsed,
+		GasPrice:  gasPrice,
+		Data:      dataBytes, // Token transfer data
+		Timestamp: time.Now(),
+		Inputs:    inputs,
+		Outputs:   outputs,
+		Signature: []byte{}, // Will be set when signed
+	}
+
+	// Calculate hash
+	tx.Hash = tx.CalculateHash()
+
+	return tx, nil
+}
+
+// GetDeployedTokens returns all deployed tokens
+func (bc *BlockchainV2) GetDeployedTokens() []*TokenInfo {
+	bc.mu.RLock()
+	defer bc.mu.RUnlock()
+
+	tokens := make([]*TokenInfo, 0, len(bc.deployedTokens))
+	for _, token := range bc.deployedTokens {
+		tokens = append(tokens, token)
+	}
+	return tokens
 }
 
 // GetAddressTransactions returns all transactions for a given address
@@ -1995,6 +2355,24 @@ func (bc *BlockchainV2) validateTransactionNonce(tx *Transaction) error {
 	return nil
 }
 
+// validateTransactionNonceUnsafe validates nonce without acquiring a lock
+// CRITICAL: Only call this when bc.mu is already locked (either RLock or Lock)
+// This is used in validateBlockV2WithParent which is called from addBlockV2 that already holds the lock
+func (bc *BlockchainV2) validateTransactionNonceUnsafe(tx *Transaction) error {
+	// Skip validation for block reward transactions (no inputs = block reward)
+	if len(tx.Inputs) == 0 {
+		return nil
+	}
+
+	addressKey := hex.EncodeToString(tx.From[:])
+	expectedNonce := bc.accountNonces[addressKey] + 1
+
+	if tx.Nonce != expectedNonce {
+		return fmt.Errorf("invalid nonce for address %s: expected %d, got %d", addressKey, expectedNonce, tx.Nonce)
+	}
+
+	return nil
+}
 
 // AddBlock adds a block to the blockchain
 func (bc *BlockchainV2) AddBlock(block *Block) error {
@@ -2071,7 +2449,7 @@ func (bc *BlockchainV2) loadChainFromStorage() {
 		// Add block to index
 		blockHashKey := hex.EncodeToString(block.Hash[:])
 		bc.blockIndex[blockHashKey] = block
-		
+
 		// Update account nonces from transactions in this block
 		for _, tx := range block.Txs {
 			// Skip block reward transactions (no inputs = block reward)
@@ -2082,8 +2460,15 @@ func (bc *BlockchainV2) loadChainFromStorage() {
 			}
 		}
 
+		// IMPORTANT: First restore token deployments, then process transactions
+		// This is critical because token transfers require deployed tokens to exist
+		for _, tx := range block.Txs {
+			bc.processTokenDeployment(&tx, block.Header.Number)
+		}
+
 		// IMPORTANT: Reconstruct UTXOs for each block
 		// This is critical because UTXOs are in-memory and need to be rebuilt
+		// Token transfers will also be processed here, restoring token balances
 		for _, tx := range block.Txs {
 			bc.processTransactionUTXOs(&tx, block.Hash)
 		}
@@ -2091,7 +2476,7 @@ func (bc *BlockchainV2) loadChainFromStorage() {
 		// IMPORTANT: Account nonces are already updated above in the loop
 	}
 
-	LogInfo("Loaded blockchain from storage - Height: %d, UTXOs restored", bc.height)
+	LogInfo("Loaded blockchain from storage - Height: %d, UTXOs restored, Tokens restored", bc.height)
 }
 
 // Close closes the blockchain and its storage
