@@ -1128,14 +1128,21 @@ func (s *ServerV2) parseBlockData(data map[string]interface{}) (*core.Block, err
 					}
 				}
 				// Parse UTXO fields
+				// Block reward transactions have no inputs, so this is optional
 				if inputs, ok := txMap["inputs"].([]interface{}); ok {
-					for _, inputData := range inputs {
+					for i, inputData := range inputs {
 						if inputMap, ok := inputData.(map[string]interface{}); ok {
 							input := core.TxInput{}
 							if prevTxHashStr, ok := inputMap["previousTxHash"].(string); ok {
-								if prevTxHashBytes, err := hex.DecodeString(prevTxHashStr); err == nil {
+								if prevTxHashBytes, err := hex.DecodeString(prevTxHashStr); err == nil && len(prevTxHashBytes) == 32 {
 									copy(input.PreviousTxHash[:], prevTxHashBytes)
+								} else {
+									// Skip this input if hash is invalid
+									continue
 								}
+							} else {
+								// Skip this input if no hash field
+								continue
 							}
 							if index, ok := inputMap["index"].(float64); ok {
 								input.Index = uint32(index)
@@ -1147,6 +1154,7 @@ func (s *ServerV2) parseBlockData(data map[string]interface{}) (*core.Block, err
 						}
 					}
 				}
+				// Note: No inputs is normal for block reward transactions
 
 				if outputs, ok := txMap["outputs"].([]interface{}); ok {
 					for _, outputData := range outputs {
