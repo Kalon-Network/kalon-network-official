@@ -617,16 +617,18 @@ func (rpc *RPCBlockchainV2) CreateNewBlock(miner core.Address, txs []core.Transa
 		merkleRootBytes, err := hex.DecodeString(merkleRootStr)
 		if err == nil && len(merkleRootBytes) == 32 {
 			copy(merkleRoot[:], merkleRootBytes)
-			core.LogDebug("Using merkle root from RPC server: %x", merkleRoot)
+			core.LogInfo("✅ Using merkle root from RPC server: %x", merkleRoot)
 		} else {
 			// Fallback: calculate merkle root
-			core.LogDebug("Failed to parse merkle root from RPC, calculating...")
+			core.LogError("❌ Failed to parse merkle root from RPC (len=%d, err=%v), calculating...", len(merkleRootBytes), err)
 			merkleRoot = calculateMerkleRoot(blockTxs)
+			core.LogInfo("📊 Calculated merkle root: %x", merkleRoot)
 		}
 	} else {
 		// Fallback: calculate merkle root
-		core.LogDebug("No merkle root in RPC response, calculating...")
+		core.LogError("❌ No merkle root in RPC response, calculating...")
 		merkleRoot = calculateMerkleRoot(blockTxs)
+		core.LogInfo("📊 Calculated merkle root: %x", merkleRoot)
 	}
 
 	// CRITICAL: Extract miner address from first transaction (miner reward transaction)
