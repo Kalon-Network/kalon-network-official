@@ -2,7 +2,7 @@
   "chainId": 7717,
   "name": "Kalon Network",
   "symbol": "KALON",
-  "blockTimeTargetSeconds": 30,
+  "blockTimeTargetSeconds": 15,
   "maxSupply": 1000000000,
   "initialBlockReward": 5.0,
   "halvingSchedule": [

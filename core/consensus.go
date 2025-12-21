@@ -173,14 +173,7 @@ func (cm *ConsensusManager) ValidateProofOfWork(block *Block) bool {
 }
 
 // CalculateDifficulty calculates the difficulty for the next block using LWMA
-// Uses current time (for mining new blocks)
 func (cm *ConsensusManager) CalculateDifficulty(height uint64, parent *Block, blockHistory []time.Time) uint64 {
-	return cm.CalculateDifficultyWithTimestamp(height, parent, blockHistory, time.Now())
-}
-
-// CalculateDifficultyWithTimestamp calculates the difficulty using a specific timestamp
-// This is used for validation to ensure consistent difficulty regardless of when block is received
-func (cm *ConsensusManager) CalculateDifficultyWithTimestamp(height uint64, parent *Block, blockHistory []time.Time, blockTimestamp time.Time) uint64 {
 	if height == 0 {
 		return cm.genesis.Difficulty.InitialDifficulty // Initial difficulty
 	}
@@ -199,40 +192,29 @@ func (cm *ConsensusManager) CalculateDifficultyWithTimestamp(height uint64, pare
 		return parent.Header.Difficulty
 	}
 
-	// Need at least 2 blocks for LWMA calculation
-	if len(blockHistory) < 2 {
-		return parent.Header.Difficulty
-	}
-
-	// Difficulty-Timeout: Reset to initial difficulty if no blocks found for 10 minutes
-	// This prevents the difficulty from getting stuck too high when all miners are stopped
-	// CRITICAL: Use blockTimestamp instead of time.Now() for consistent validation
-	if len(blockHistory) > 0 {
-		lastBlockTime := blockHistory[len(blockHistory)-1]
-		timeSinceLastBlock := blockTimestamp.Sub(lastBlockTime)
-
-		// Reset to initial difficulty after 10 minutes of no blocks
-		if timeSinceLastBlock > 10*time.Minute {
-			LogDebug("Difficulty-Timeout: No blocks for %v, resetting difficulty to initial (%d)", timeSinceLastBlock, cm.genesis.Difficulty.InitialDifficulty)
-			return cm.genesis.Difficulty.InitialDifficulty
-		}
-	}
-
-	// Calculate LWMA (Linear Weighted Moving Average)
-	// Weight more recent blocks more heavily
+	// CRITICAL: Check for Quick Adjust and Timeout BEFORE checking if we have enough blocks for LWMA
+	// This ensures difficulty adjusts even if blockHistory is short or filtered
 	targetBlockTime := time.Duration(cm.genesis.BlockTimeTarget) * time.Second
-
-	// IMPORTANT: Include time since last block in LWMA calculation
-	// This ensures difficulty adjusts immediately when blocks are found slowly
-	// Without this, LWMA would only use old fast blocks and difficulty would keep rising
-	// Use provided timestamp (block's timestamp for validation, time.Now() for mining)
-	currentTime := blockTimestamp
+	currentTime := time.Now()
+	
+	LogInfo("CalculateDifficulty: height=%d, blockHistory len=%d, parent.Difficulty=%d", height, len(blockHistory), parent.Header.Difficulty)
+	
 	if len(blockHistory) > 0 {
 		lastBlockTime := blockHistory[len(blockHistory)-1]
 		timeSinceLastBlock := currentTime.Sub(lastBlockTime)
+		
+		LogInfo("CalculateDifficulty: lastBlockTime=%v, timeSinceLastBlock=%v, targetBlockTime*2=%v", lastBlockTime, timeSinceLastBlock, targetBlockTime*2)
 
-		// If significant time has passed since last block (> 2x targetBlockTime)
+		// Difficulty-Timeout: Reset to initial difficulty if no blocks found for 10 minutes
+		// This prevents the difficulty from getting stuck too high when all miners are stopped
+		if timeSinceLastBlock > 10*time.Minute {
+			LogInfo("Difficulty-Timeout: No blocks for %v, resetting difficulty to initial (%d)", timeSinceLastBlock, cm.genesis.Difficulty.InitialDifficulty)
+			return cm.genesis.Difficulty.InitialDifficulty
+		}
+
+		// Quick Adjust: If significant time has passed since last block (> 2x targetBlockTime)
 		// immediately reduce difficulty (don't wait for LWMA)
+		// This works even if blockHistory has only 1 block or gets filtered
 		if timeSinceLastBlock > targetBlockTime*2 {
 			// Calculate reduction factor based on wait time
 			// Longer wait = stronger reduction
@@ -245,15 +227,39 @@ func (cm *ConsensusManager) CalculateDifficultyWithTimestamp(height uint64, pare
 
 			newDifficulty := uint64(float64(parent.Header.Difficulty) * reductionFactor)
 
-			// Respect MinDifficulty
-			if cm.genesis.Difficulty.MinDifficulty > 0 && newDifficulty < cm.genesis.Difficulty.MinDifficulty {
-				newDifficulty = cm.genesis.Difficulty.MinDifficulty
+			// Respect MinDifficulty, BUT allow further reduction if we're already stuck at minDifficulty
+			// and no blocks have been found for a long time (more than 5 minutes)
+			if cm.genesis.Difficulty.MinDifficulty > 0 {
+				if timeSinceLastBlock > 5*time.Minute && parent.Header.Difficulty == cm.genesis.Difficulty.MinDifficulty {
+					// If we're already at minDifficulty and still no blocks after 5 minutes,
+					// allow reduction below minDifficulty (but not below 1)
+					if newDifficulty < 1 {
+						newDifficulty = 1
+					}
+					LogInfo("Difficulty-QuickAdjust: Allowing reduction below minDifficulty (was %d, now %d) due to long wait (%v)",
+						cm.genesis.Difficulty.MinDifficulty, newDifficulty, timeSinceLastBlock)
+				} else if newDifficulty < cm.genesis.Difficulty.MinDifficulty {
+					newDifficulty = cm.genesis.Difficulty.MinDifficulty
+				}
 			}
 
-			log.Printf("Difficulty-QuickAdjust: %v since last block, reducing from %d to %d (factor: %.2f)",
+			LogInfo("Difficulty-QuickAdjust: %v since last block, reducing from %d to %d (factor: %.2f)",
 				timeSinceLastBlock, parent.Header.Difficulty, newDifficulty, reductionFactor)
 			return newDifficulty
 		}
+	}
+
+	// Need at least 2 blocks for LWMA calculation
+	if len(blockHistory) < 2 {
+		return parent.Header.Difficulty
+	}
+
+	// Calculate LWMA (Linear Weighted Moving Average)
+	// Weight more recent blocks more heavily
+	// IMPORTANT: Include time since last block in LWMA calculation
+	// This ensures difficulty adjusts immediately when blocks are found slowly
+	// Without this, LWMA would only use old fast blocks and difficulty would keep rising
+	if len(blockHistory) > 0 {
 
 		// Extend blockHistory with current time as "virtual block"
 		// This includes the wait time in LWMA calculation
@@ -269,6 +275,32 @@ func (cm *ConsensusManager) CalculateDifficultyWithTimestamp(height uint64, pare
 	var weightSum float64
 	var weightedTimeSum time.Duration
 
+	// Filter block history to only include blocks with valid intervals (>= 1s)
+	// This prevents simultaneous blocks from skewing the difficulty calculation
+	// CRITICAL: Even if blocks are already in the chain, we filter them here for difficulty calculation
+	filteredHistory := make([]time.Time, 0, len(blockHistory))
+	if len(blockHistory) > 0 {
+		filteredHistory = append(filteredHistory, blockHistory[0]) // Always include first block
+		minValidInterval := 1 * time.Second
+		
+		for i := 1; i < len(blockHistory); i++ {
+			blockTime := blockHistory[i].Sub(blockHistory[i-1])
+			// Only include blocks with valid interval (>= 1s)
+			// This filters out simultaneous blocks that would increase difficulty incorrectly
+			if blockTime >= minValidInterval {
+				filteredHistory = append(filteredHistory, blockHistory[i])
+			}
+		}
+	}
+	
+	// Use filtered history for LWMA calculation
+	if len(filteredHistory) < 2 {
+		// Not enough valid blocks, use parent difficulty
+		return parent.Header.Difficulty
+	}
+	
+	blockHistory = filteredHistory
+	
 	for i, timestamp := range blockHistory {
 		// Weight: more recent blocks have higher weight
 		// Weight = position in array (last block has highest weight)

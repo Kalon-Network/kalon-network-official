@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"bytes"
@@ -20,6 +20,8 @@ import (
 	"github.com/kalon-network/kalon/core"
 	"github.com/kalon-network/kalon/crypto"
 )
+
+const templateTTL = 30 * time.Second
 
 func init() {
 	// Set default log level for miner
@@ -224,6 +226,22 @@ func (m *MinerV2) mineBlock(workerID int) {
 		return
 	}
 
+	// Sanity-check template against current mining info (difficulty & parent)
+	if height, expDifficulty, bestHash, ok := m.getMiningInfo(); ok {
+		if expDifficulty > 0 && block.Header.Difficulty != expDifficulty {
+			core.LogWarn("Template difficulty stale: template %d vs expected %d (height %d). Refreshing template.",
+				block.Header.Difficulty, expDifficulty, height)
+			time.Sleep(150 * time.Millisecond)
+			return
+		}
+		if bestHash != nil && *bestHash != block.Header.ParentHash {
+			core.LogWarn("Template parent stale: template %x vs best %x (height %d). Refreshing template.",
+				block.Header.ParentHash, *bestHash, height)
+			time.Sleep(150 * time.Millisecond)
+			return
+		}
+	}
+
 	// Mine the block
 	startTime := time.Now()
 	nonce := uint64(0)
@@ -234,6 +252,11 @@ func (m *MinerV2) mineBlock(workerID int) {
 		case <-m.stopChan:
 			return
 		default:
+			// Refresh template periodically to avoid stale headers/difficulty
+			if time.Since(startTime) > templateTTL {
+				core.LogInfo("Template TTL (%v) expired, refreshing template", templateTTL)
+				return
+			}
 			// Update nonce
 			block.Header.Nonce = nonce
 			block.Hash = block.CalculateHash()
@@ -429,9 +452,6 @@ func (rpc *RPCBlockchainV2) CreateNewBlock(miner core.Address, txs []core.Transa
 	difficulty, _ := result["difficulty"].(float64)
 	parentHashStr, _ := result["parentHash"].(string)
 	timestamp, _ := result["timestamp"].(float64)
-	networkFee, _ := result["networkFee"].(float64)
-	treasuryFee, _ := result["treasuryFee"].(float64)
-	core.LogDebug("Extracted from RPC template: networkFee=%f, treasuryFee=%f", networkFee, treasuryFee)
 
 	// Parse parent hash
 	parentHashBytes, err := hex.DecodeString(parentHashStr)
@@ -631,21 +651,6 @@ func (rpc *RPCBlockchainV2) CreateNewBlock(miner core.Address, txs []core.Transa
 		core.LogInfo("📊 Calculated merkle root: %x", merkleRoot)
 	}
 
-	// CRITICAL: Extract miner address from first transaction (miner reward transaction)
-	// This ensures the miner address in the block header matches the reward transaction
-	blockMiner := miner // Default to parsed miner address
-	if len(blockTxs) > 0 {
-		// First transaction is always the miner reward transaction
-		rewardTx := blockTxs[0]
-		// Use the recipient address from the reward transaction (To or Outputs[0].Address)
-		if rewardTx.To != (core.Address{}) {
-			blockMiner = rewardTx.To
-		} else if len(rewardTx.Outputs) > 0 {
-			blockMiner = rewardTx.Outputs[0].Address
-		}
-		core.LogDebug("Using miner address from reward transaction: %x (parsed: %x)", blockMiner, miner)
-	}
-
 	// Create block with transactions from RPC server
 	block := &core.Block{
 		Header: core.BlockHeader{
@@ -653,12 +658,12 @@ func (rpc *RPCBlockchainV2) CreateNewBlock(miner core.Address, txs []core.Transa
 			Number:      uint64(number),
 			Timestamp:   time.Unix(int64(timestamp), 0),
 			Difficulty:  uint64(difficulty),
-			Miner:       blockMiner, // CRITICAL: Use miner address from reward transaction
+			Miner:       miner,
 			Nonce:       0,
 			MerkleRoot:  merkleRoot, // Calculate merkle root from transactions
 			TxCount:     uint32(len(blockTxs)),
-			NetworkFee:  uint64(networkFee),  // CRITICAL: Use networkFee from RPC template
-			TreasuryFee: uint64(treasuryFee), // CRITICAL: Use treasuryFee from RPC template
+			NetworkFee:  0,
+			TreasuryFee: 0,
 		},
 		Txs:  blockTxs, // Use transactions from RPC server
 		Hash: core.Hash{},
@@ -731,8 +736,6 @@ func (rpc *RPCBlockchainV2) AddBlock(block *core.Block) error {
 			"merkleRoot":   hex.EncodeToString(block.Header.MerkleRoot[:]), // Include merkle root
 			"txCount":      float64(block.Header.TxCount),
 			"miner":        hex.EncodeToString(block.Header.Miner[:]), // Include miner address
-			"networkFee":   float64(block.Header.NetworkFee),          // CRITICAL: Include networkFee
-			"treasuryFee":  float64(block.Header.TreasuryFee),         // CRITICAL: Include treasuryFee
 			"transactions": transactions,                              // CRITICAL: Include transactions!
 		},
 	}
@@ -971,6 +974,47 @@ func (m *MinerV2) getBestBlock() *core.Block {
 	return &core.Block{
 		Hash: hash,
 	}
+}
+
+// getMiningInfo fetches current height, expected difficulty and best hash
+func (m *MinerV2) getMiningInfo() (uint64, uint64, *core.Hash, bool) {
+	req := RPCRequest{
+		JSONRPC: "2.0",
+		Method:  "getMiningInfo",
+		Params:  map[string]interface{}{},
+		ID:      997,
+	}
+
+	resp, err := m.blockchain.callRPC(req)
+	if err != nil || resp == nil || resp.Error != nil {
+		return 0, 0, nil, false
+	}
+
+	result, ok := resp.Result.(map[string]interface{})
+	if !ok {
+		return 0, 0, nil, false
+	}
+
+	var height uint64
+	if h, ok := result["height"].(float64); ok {
+		height = uint64(h)
+	}
+
+	var diff uint64
+	if d, ok := result["difficulty"].(float64); ok {
+		diff = uint64(d)
+	}
+
+	var bestHash *core.Hash
+	if bestStr, ok := result["bestBlock"].(string); ok {
+		if bytes, err := hex.DecodeString(bestStr); err == nil && len(bytes) == 32 {
+			var h core.Hash
+			copy(h[:], bytes)
+			bestHash = &h
+		}
+	}
+
+	return height, diff, bestHash, true
 }
 
 // RPCRequest represents a JSON-RPC request

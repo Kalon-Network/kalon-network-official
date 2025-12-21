@@ -108,6 +108,10 @@ func main() {
 		handleBalance(walletManager, args)
 	case "send":
 		handleSend(walletManager, args)
+	case "deploy-token":
+		handleDeployToken(walletManager, args)
+	case "send-token":
+		handleSendToken(walletManager, args)
 	case "info":
 		handleInfo(walletManager, args)
 	case "help":
@@ -298,29 +302,24 @@ func handleExport(wm *WalletManager, args []string) {
 	fmt.Println(string(jsonData))
 }
 
-// getDefaultRPC returns the default RPC URL from environment or uses Explorer
-func getDefaultRPC() string {
-	// Check environment variable first
-	if envRPC := os.Getenv("KALON_RPC_URL"); envRPC != "" {
-		return envRPC
-	}
-	// Default to Explorer RPC
-	return "https://explorer.kalon-network.com/rpc"
-}
-
 // handleBalance handles balance queries
 func handleBalance(wm *WalletManager, args []string) {
 	fs := flag.NewFlagSet("balance", flag.ExitOnError)
 	address := fs.String("address", "", "Address to check balance")
-	rpcURL := fs.String("rpc", "", "RPC server URL (default: from KALON_RPC_URL env or https://explorer.kalon-network.com/rpc)")
+	rpcURL := fs.String("rpc", "http://localhost:16316/rpc", "RPC server URL")
 	fs.Parse(args)
 
-	// Use default RPC if not provided
-	if *rpcURL == "" {
-		*rpcURL = getDefaultRPC()
+	// Ensure RPC URL has /rpc endpoint
+	rpcURLStr := *rpcURL
+	if !strings.HasSuffix(rpcURLStr, "/rpc") {
+		if !strings.HasSuffix(rpcURLStr, "/") {
+			rpcURLStr += "/rpc"
+		} else {
+			rpcURLStr += "rpc"
+		}
 	}
 
-	// Get address
+	// Get address - interactive if not provided
 	var targetAddress string
 	if *address != "" {
 		targetAddress = *address
@@ -331,34 +330,121 @@ func handleBalance(wm *WalletManager, args []string) {
 		}
 		targetAddress = addr
 	} else {
-		log.Fatal("No address provided and no wallet loaded")
+		// Interactive wallet selection
+		walletFile, wallet, err := selectWallet("Select wallet to check balance:")
+		if err != nil {
+			log.Fatal(err)
+		}
+		targetAddress, _ = wallet.GetAddressString()
+		fmt.Printf("Selected: %s (%s)\n\n", walletFile, targetAddress)
 	}
 
-	// Query balance via RPC
-	balanceMicro, err := queryBalance(*rpcURL, targetAddress)
+	// Query balance and token balances via getAddressInfo RPC
+	client := &http.Client{Timeout: 30 * time.Second}
+	req := RPCRequest{
+		JSONRPC: "2.0",
+		Method:  "getAddressInfo",
+		Params: map[string]interface{}{
+			"address": targetAddress,
+		},
+		ID: 1,
+	}
+
+	reqData, err := json.Marshal(req)
 	if err != nil {
-		log.Fatalf("Failed to query balance: %v\nHint: You can set KALON_RPC_URL environment variable or use --rpc flag", err)
+		log.Fatalf("Failed to marshal request: %v", err)
 	}
 
-	// Convert to tKALON for display
+	resp, err := client.Post(rpcURLStr, "application/json", bytes.NewBuffer(reqData))
+	if err != nil {
+		log.Fatalf("Failed to query balance: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("Failed to read response: %v", err)
+	}
+
+	var rpcResp RPCResponse
+	if err := json.Unmarshal(body, &rpcResp); err != nil {
+		log.Fatalf("Failed to parse response: %v", err)
+	}
+
+	if rpcResp.Error != nil {
+		log.Fatalf("RPC error: %s", rpcResp.Error.Message)
+	}
+
+	// Parse response
+	result, ok := rpcResp.Result.(map[string]interface{})
+	if !ok {
+		log.Fatalf("Invalid response format")
+	}
+
+	// Get KALON balance
+	balanceMicro := uint64(0)
+	if balance, ok := result["balance"].(float64); ok {
+		balanceMicro = uint64(balance)
+	}
 	balanceTKALON := float64(balanceMicro) / 1000000.0
 
-	// Create response (keep micro-KALON in JSON for API compatibility)
-	response := &BalanceResponse{
-		Address: targetAddress,
-		Balance: balanceMicro,
+	// Get token balances
+	tokenBalances := make(map[string]uint64)
+	if tokenBalancesMap, ok := result["tokenBalances"].(map[string]interface{}); ok {
+		for tokenName, balance := range tokenBalancesMap {
+			if balanceFloat, ok := balance.(float64); ok {
+				tokenBalances[tokenName] = uint64(balanceFloat)
+			}
+		}
 	}
 
-	// Output result with user-friendly format
+	// Output result
+	fmt.Println("═══════════════════════════════════════════════════════════")
+	fmt.Printf("💰 WALLET BALANCE\n")
+	fmt.Println("═══════════════════════════════════════════════════════════")
 	fmt.Printf("Address: %s\n", targetAddress)
-	fmt.Printf("Balance: %.2f tKALON (%d micro-KALON)\n", balanceTKALON, balanceMicro)
+	fmt.Printf("KALON Balance: %.2f tKALON (%d micro-KALON)\n", balanceTKALON, balanceMicro)
 	fmt.Println()
-	fmt.Println("JSON Format:")
-	jsonData, err := json.MarshalIndent(response, "", "  ")
-	if err != nil {
-		log.Fatalf("Failed to marshal balance: %v", err)
+
+	// Show token balances if any
+	if len(tokenBalances) > 0 {
+		fmt.Println("🪙 TOKEN BALANCES:")
+		for tokenName, balance := range tokenBalances {
+			fmt.Printf("  %s: %s\n", tokenName, formatLargeNumber(balance))
+		}
+		fmt.Println()
+	} else {
+		fmt.Println("🪙 TOKEN BALANCES: None")
+		fmt.Println()
 	}
-	fmt.Println(string(jsonData))
+
+	// Show transaction stats if available
+	if txCount, ok := result["transactionCount"].(float64); ok {
+		fmt.Printf("📊 Transaction Count: %.0f\n", txCount)
+	}
+	if sentCount, ok := result["sentCount"].(float64); ok {
+		fmt.Printf("📤 Sent Transactions: %.0f\n", sentCount)
+	}
+	if receivedCount, ok := result["receivedCount"].(float64); ok {
+		fmt.Printf("📥 Received Transactions: %.0f\n", receivedCount)
+	}
+	fmt.Println("═══════════════════════════════════════════════════════════")
+}
+
+// formatLargeNumber formats large numbers with commas
+func formatLargeNumber(n uint64) string {
+	str := fmt.Sprintf("%d", n)
+	if len(str) <= 3 {
+		return str
+	}
+	var result strings.Builder
+	for i, r := range str {
+		if i > 0 && (len(str)-i)%3 == 0 {
+			result.WriteString(",")
+		}
+		result.WriteRune(r)
+	}
+	return result.String()
 }
 
 // getAvailableWallets returns list of available wallet files
@@ -409,10 +495,21 @@ func selectWallet(prompt string) (string, *crypto.Wallet, error) {
 	}
 
 	fmt.Printf("%s\n", prompt)
+	// Generate wallets first to show correct addresses
+	bm := crypto.NewBIP39Manager()
+	generatedWallets := make([]*crypto.Wallet, len(wallets))
 	for i, w := range wallets {
 		walletInfo, err := loadWallet(w)
 		if err == nil {
-			fmt.Printf("  [%d] %s (Address: %s)\n", i+1, w, walletInfo.Address)
+			// Generate wallet from mnemonic to get correct address
+			genWallet, err := bm.CreateWalletFromMnemonic(walletInfo.Mnemonic, "")
+			if err == nil {
+				generatedWallets[i] = genWallet
+				addr, _ := genWallet.GetAddressString()
+				fmt.Printf("  [%d] %s (Address: %s)\n", i+1, w, addr)
+			} else {
+				fmt.Printf("  [%d] %s (error: %v)\n", i+1, w, err)
+			}
 		} else {
 			fmt.Printf("  [%d] %s (corrupted)\n", i+1, w)
 		}
@@ -422,12 +519,15 @@ func selectWallet(prompt string) (string, *crypto.Wallet, error) {
 	input = strings.TrimSpace(input)
 
 	var walletFile string
+	var selectedIndex int
 	if num, err := strconv.Atoi(input); err == nil && num > 0 && num <= len(wallets) {
-		walletFile = wallets[num-1]
+		selectedIndex = num - 1
+		walletFile = wallets[selectedIndex]
 	} else {
 		// Check if input is a filename
-		for _, w := range wallets {
+		for i, w := range wallets {
 			if w == input || strings.Contains(w, input) {
+				selectedIndex = i
 				walletFile = w
 				break
 			}
@@ -437,14 +537,19 @@ func selectWallet(prompt string) (string, *crypto.Wallet, error) {
 		}
 	}
 
-	walletInfo, err := loadWallet(walletFile)
-	if err != nil {
-		return "", nil, err
-	}
-	bm := crypto.NewBIP39Manager()
-	wallet, err := bm.CreateWalletFromMnemonic(walletInfo.Mnemonic, "")
-	if err != nil {
-		return "", nil, err
+	// Use pre-generated wallet if available, otherwise generate new one
+	var wallet *crypto.Wallet
+	if selectedIndex < len(generatedWallets) && generatedWallets[selectedIndex] != nil {
+		wallet = generatedWallets[selectedIndex]
+	} else {
+		walletInfo, err := loadWallet(walletFile)
+		if err != nil {
+			return "", nil, err
+		}
+		wallet, err = bm.CreateWalletFromMnemonic(walletInfo.Mnemonic, "")
+		if err != nil {
+			return "", nil, err
+		}
 	}
 	return walletFile, wallet, nil
 }
@@ -456,12 +561,12 @@ func handleSend(wm *WalletManager, args []string) {
 	toFlag := fs.String("to", "", "Recipient address or wallet file")
 	amountFlag := fs.Uint64("amount", 0, "Amount to send (micro-KALON)")
 	feeFlag := fs.Uint64("fee", 0, "Transaction fee (micro-KALON, default: 100000)")
-	rpcURLFlag := fs.String("rpc", "", "RPC server URL (default: from KALON_RPC_URL env or https://explorer.kalon-network.com/rpc)")
+	rpcURLFlag := fs.String("rpc", "", "RPC server URL (default: http://localhost:16316/rpc)")
 	fs.Parse(args)
 
 	reader := bufio.NewReader(os.Stdin)
 	// Use default RPC if not provided
-	rpcURL := getDefaultRPC()
+	rpcURL := "http://localhost:16316/rpc"
 	if *rpcURLFlag != "" {
 		rpcURL = *rpcURLFlag
 	}
@@ -487,6 +592,10 @@ func handleSend(wm *WalletManager, args []string) {
 			// Assume it's an address
 			fromAddress = *fromFlag
 		}
+	} else if wm.wallet != nil {
+		// Use wallet from wallet manager if available
+		fromWallet = wm.wallet
+		fromAddress, _ = fromWallet.GetAddressString()
 	} else {
 		// Interactive selection
 		walletFile, wallet, err := selectWallet("Select sender wallet:")
@@ -608,6 +717,936 @@ func handleSend(wm *WalletManager, args []string) {
 	fmt.Printf("Fee: %.2f tKALON (%d micro-KALON)\n", feeTKALON, txResp.Fee)
 	fmt.Printf("Nonce: %d\n", txResp.Nonce)
 	fmt.Printf("Success: %v\n", txResp.Success)
+}
+
+// handleSendToken handles token transfer
+func handleSendToken(wm *WalletManager, args []string) {
+	fs := flag.NewFlagSet("send-token", flag.ExitOnError)
+	fromFlag := fs.String("from", "", "Sender wallet file or address")
+	toFlag := fs.String("to", "", "Recipient address or wallet file")
+	tokenFlag := fs.String("token", "", "Token name to send")
+	amountFlag := fs.Uint64("amount", 0, "Amount to send")
+	rpcURLFlag := fs.String("rpc", "", "RPC server URL (default: http://localhost:16316/rpc)")
+	fs.Parse(args)
+
+	reader := bufio.NewReader(os.Stdin)
+	// Use default RPC if not provided
+	rpcURL := "http://localhost:16316/rpc"
+	if *rpcURLFlag != "" {
+		rpcURL = *rpcURLFlag
+	}
+
+	// Ensure RPC URL has /rpc endpoint
+	if !strings.HasSuffix(rpcURL, "/rpc") {
+		if !strings.HasSuffix(rpcURL, "/") {
+			rpcURL += "/rpc"
+		} else {
+			rpcURL += "rpc"
+		}
+	}
+
+	// Interactive mode if parameters are missing
+	var fromWallet *crypto.Wallet
+	var fromAddress string
+
+	// Get sender wallet
+	if *fromFlag != "" {
+		// Try to load as wallet file
+		if walletInfo, err := loadWallet(*fromFlag); err == nil {
+			bm := crypto.NewBIP39Manager()
+			fromWallet, err = bm.CreateWalletFromMnemonic(walletInfo.Mnemonic, "")
+			if err != nil {
+				log.Fatalf("Failed to create wallet from mnemonic: %v", err)
+			}
+			fromAddress, _ = fromWallet.GetAddressString()
+		} else {
+			// Assume it's an address
+			fromAddress = *fromFlag
+		}
+	} else if wm.wallet != nil {
+		// Use wallet from wallet manager if available
+		fromWallet = wm.wallet
+		fromAddress, _ = fromWallet.GetAddressString()
+	} else {
+		// Interactive selection
+		walletFile, wallet, err := selectWallet("Select sender wallet:")
+		if err != nil {
+			log.Fatal(err)
+		}
+		fromWallet = wallet
+		fromAddress, _ = wallet.GetAddressString()
+		fmt.Printf("Selected: %s (%s)\n\n", walletFile, fromAddress)
+	}
+
+	// Get token balances for this address
+	client := &http.Client{Timeout: 30 * time.Second}
+	req := RPCRequest{
+		JSONRPC: "2.0",
+		Method:  "getAddressInfo",
+		Params: map[string]interface{}{
+			"address": fromAddress,
+		},
+		ID: 1,
+	}
+
+	reqData, err := json.Marshal(req)
+	if err != nil {
+		log.Fatalf("Failed to marshal request: %v", err)
+	}
+
+	resp, err := client.Post(rpcURL, "application/json", bytes.NewBuffer(reqData))
+	if err != nil {
+		log.Fatalf("Failed to query address info: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Fatalf("Failed to read response: %v", err)
+	}
+
+	var rpcResp RPCResponse
+	if err := json.Unmarshal(body, &rpcResp); err != nil {
+		log.Fatalf("Failed to parse response: %v", err)
+	}
+
+	if rpcResp.Error != nil {
+		log.Fatalf("RPC error: %s", rpcResp.Error.Message)
+	}
+
+	// Parse response
+	result, ok := rpcResp.Result.(map[string]interface{})
+	if !ok {
+		log.Fatalf("Invalid response format")
+	}
+
+	// Get token balances
+	tokenBalances, ok := result["tokenBalances"].(map[string]interface{})
+	if !ok {
+		tokenBalances = make(map[string]interface{})
+	}
+
+	// Filter tokens with balance > 0
+	availableTokens := make([]string, 0)
+	tokenBalanceMap := make(map[string]uint64)
+	for tokenName, balanceInterface := range tokenBalances {
+		var balance uint64
+		switch v := balanceInterface.(type) {
+		case float64:
+			balance = uint64(v)
+		case uint64:
+			balance = v
+		default:
+			continue
+		}
+		if balance > 0 {
+			availableTokens = append(availableTokens, tokenName)
+			tokenBalanceMap[tokenName] = balance
+		}
+	}
+
+	if len(availableTokens) == 0 {
+		log.Fatal("❌ No tokens with balance found in this wallet")
+	}
+
+	// Display available tokens
+	fmt.Println("═══════════════════════════════════════════════════════")
+	fmt.Println("🪙 AVAILABLE TOKENS")
+	fmt.Println("═══════════════════════════════════════════════════════")
+	for i, tokenName := range availableTokens {
+		balance := tokenBalanceMap[tokenName]
+		fmt.Printf("  [%d] %s: %s\n", i+1, tokenName, formatTokenAmount(balance))
+	}
+	fmt.Println("═══════════════════════════════════════════════════════")
+	fmt.Println()
+
+	// Get token selection
+	var selectedToken string
+	if *tokenFlag != "" {
+		selectedToken = *tokenFlag
+		// Validate token exists and has balance
+		if _, exists := tokenBalanceMap[selectedToken]; !exists {
+			log.Fatalf("Token '%s' not found or has no balance", selectedToken)
+		}
+	} else {
+		fmt.Printf("Select token (1-%d): ", len(availableTokens))
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		
+		index, err := strconv.Atoi(input)
+		if err != nil || index < 1 || index > len(availableTokens) {
+			log.Fatalf("Invalid selection: %s", input)
+		}
+		selectedToken = availableTokens[index-1]
+	}
+
+	selectedBalance := tokenBalanceMap[selectedToken]
+	fmt.Printf("Selected token: %s (Balance: %s)\n\n", selectedToken, formatTokenAmount(selectedBalance))
+
+	// Get recipient address
+	var toAddress string
+	if *toFlag != "" {
+		// Check if it's a wallet file
+		if walletInfo, err := loadWallet(*toFlag); err == nil {
+			toAddress = walletInfo.Address
+		} else {
+			// Assume it's an address
+			toAddress = *toFlag
+		}
+	} else {
+		fmt.Print("Enter recipient address (or wallet filename): ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+
+		// Check if it's a wallet file
+		if walletInfo, err := loadWallet(input); err == nil {
+			toAddress = walletInfo.Address
+			fmt.Printf("Using wallet address: %s\n", toAddress)
+		} else {
+			toAddress = input
+		}
+	}
+
+	// Get amount
+	var amount uint64
+	if *amountFlag > 0 {
+		amount = *amountFlag
+	} else {
+		fmt.Printf("Enter amount to send (max: %s): ", formatTokenAmount(selectedBalance))
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		parsed, err := strconv.ParseUint(input, 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid amount: %v", err)
+		}
+		amount = parsed
+	}
+
+	// Validate amount
+	if amount == 0 {
+		log.Fatal("Amount must be greater than 0")
+	}
+	if amount > selectedBalance {
+		log.Fatalf("Insufficient balance: need %s, have %s", formatTokenAmount(amount), formatTokenAmount(selectedBalance))
+	}
+
+	// Default fee for token transfers (1 tKALON = 1000000 micro-KALON)
+	defaultFee := uint64(1000000)
+	fmt.Printf("\nNetwork fee: %.2f tKALON (default)\n\n", float64(defaultFee)/1000000.0)
+
+	// If we don't have a wallet for signing, we need to load it
+	if fromWallet == nil {
+		// Try to find wallet by address
+		wallets := getAvailableWallets()
+		for _, wf := range wallets {
+			walletInfo, err := loadWallet(wf)
+			if err != nil {
+				continue
+			}
+			if walletInfo.Address == fromAddress {
+				bm := crypto.NewBIP39Manager()
+				fromWallet, err = bm.CreateWalletFromMnemonic(walletInfo.Mnemonic, "")
+				if err != nil {
+					continue
+				}
+				break
+			}
+		}
+		if fromWallet == nil {
+			log.Fatal("Cannot find wallet for address. Please specify --from with wallet file")
+		}
+	}
+
+	// Send token transfer
+	txResp, err := sendTokenTransfer(rpcURL, fromAddress, toAddress, selectedToken, amount, defaultFee, fromWallet)
+	if err != nil {
+		log.Fatalf("Failed to send token transfer: %v", err)
+	}
+
+	// Output result
+	fmt.Printf("\n✅ Token transfer sent successfully!\n")
+	fmt.Printf("Hash: %s\n", txResp.Hash)
+	fmt.Printf("From: %s\n", txResp.From)
+	fmt.Printf("To: %s\n", txResp.To)
+	fmt.Printf("Token: %s\n", selectedToken)
+	fmt.Printf("Amount: %s\n", formatTokenAmount(amount))
+	fmt.Printf("Fee: %.2f tKALON (%d micro-KALON)\n", float64(txResp.Fee)/1000000.0, txResp.Fee)
+	fmt.Printf("Nonce: %d\n", txResp.Nonce)
+	fmt.Printf("Success: %v\n", txResp.Success)
+}
+
+// sendTokenTransfer sends a token transfer transaction
+func sendTokenTransfer(rpcURL string, fromAddress, toAddress, tokenName string, amount, fee uint64, wallet *crypto.Wallet) (*TransactionResponse, error) {
+	// Ensure RPC URL has /rpc endpoint
+	if !strings.HasSuffix(rpcURL, "/rpc") {
+		if !strings.HasSuffix(rpcURL, "/") {
+			rpcURL += "/rpc"
+		} else {
+			rpcURL += "rpc"
+		}
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	// Step 1: Create token transfer transaction via sendToken RPC
+	sendTokenReq := RPCRequest{
+		JSONRPC: "2.0",
+		Method:  "sendToken",
+		Params: map[string]interface{}{
+			"from":     fromAddress,
+			"to":       toAddress,
+			"tokenName": tokenName,
+			"amount":   amount,
+			"fee":      fee,
+		},
+		ID: 1,
+	}
+
+	reqData, err := json.Marshal(sendTokenReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal sendToken request: %v", err)
+	}
+
+	resp, err := client.Post(rpcURL, "application/json", bytes.NewBuffer(reqData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create token transfer transaction: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read sendToken response: %v", err)
+	}
+
+	var sendTokenResp RPCResponse
+	if err := json.Unmarshal(body, &sendTokenResp); err != nil {
+		return nil, fmt.Errorf("failed to parse sendToken response: %v", err)
+	}
+
+	if sendTokenResp.Error != nil {
+		return nil, fmt.Errorf("RPC error creating token transfer: %s", sendTokenResp.Error.Message)
+	}
+
+	// Parse transaction from sendToken response
+	txData, ok := sendTokenResp.Result.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid sendToken response format")
+	}
+
+	// Build transaction from server response
+	tx := &core.Transaction{}
+
+	// Parse addresses
+	if fromStr, ok := txData["from"].(string); ok {
+		tx.From = core.AddressFromString(fromStr)
+	}
+	if toStr, ok := txData["to"].(string); ok {
+		tx.To = core.AddressFromString(toStr)
+	}
+
+	// Parse amounts
+	if amountFloat, ok := txData["amount"].(float64); ok {
+		tx.Amount = uint64(amountFloat)
+	}
+	if feeFloat, ok := txData["fee"].(float64); ok {
+		tx.Fee = uint64(feeFloat)
+	}
+	if nonce, ok := txData["nonce"].(float64); ok {
+		tx.Nonce = uint64(nonce)
+	}
+	if gasUsed, ok := txData["gasUsed"].(float64); ok {
+		tx.GasUsed = uint64(gasUsed)
+	}
+	if tx.GasUsed == 0 {
+		tx.GasUsed = 1
+	}
+	if gasPrice, ok := txData["gasPrice"].(float64); ok {
+		tx.GasPrice = uint64(gasPrice)
+	}
+	if tx.GasPrice == 0 {
+		if tx.Fee > 0 {
+			tx.GasPrice = tx.Fee
+		} else {
+			tx.GasPrice = 10000
+		}
+	}
+
+	// Parse data (token transfer data)
+	if dataStr, ok := txData["data"].(string); ok {
+		dataBytes, err := hex.DecodeString(dataStr)
+		if err == nil {
+			tx.Data = dataBytes
+		}
+	}
+
+	// Parse inputs and outputs
+	if inputsData, ok := txData["inputs"].([]interface{}); ok {
+		for _, inputData := range inputsData {
+			if inputMap, ok := inputData.(map[string]interface{}); ok {
+				input := core.TxInput{}
+				if prevTxHashStr, ok := inputMap["previousTxHash"].(string); ok {
+					if prevTxHashBytes, err := hex.DecodeString(prevTxHashStr); err == nil && len(prevTxHashBytes) == 32 {
+						copy(input.PreviousTxHash[:], prevTxHashBytes)
+					}
+				}
+				if index, ok := inputMap["index"].(float64); ok {
+					input.Index = uint32(index)
+				}
+				tx.Inputs = append(tx.Inputs, input)
+			}
+		}
+	}
+
+	if outputsData, ok := txData["outputs"].([]interface{}); ok {
+		for _, outputData := range outputsData {
+			if outputMap, ok := outputData.(map[string]interface{}); ok {
+				output := core.TxOutput{}
+				if addrStr, ok := outputMap["address"].(string); ok {
+					output.Address = core.AddressFromString(addrStr)
+				}
+				if amount, ok := outputMap["amount"].(float64); ok {
+					output.Amount = uint64(amount)
+				}
+				tx.Outputs = append(tx.Outputs, output)
+			}
+		}
+	}
+
+	// Parse hash
+	if hashStr, ok := txData["hash"].(string); ok {
+		if hashBytes, err := hex.DecodeString(hashStr); err == nil && len(hashBytes) == 32 {
+			copy(tx.Hash[:], hashBytes)
+		} else {
+			tx.Hash = tx.CalculateHash()
+		}
+	} else {
+		tx.Hash = tx.CalculateHash()
+	}
+
+	// Step 2: Sign transaction locally
+	if err := wallet.SignTransaction(tx); err != nil {
+		return nil, fmt.Errorf("failed to sign transaction: %v", err)
+	}
+
+	// Step 3: Send signed transaction
+	inputs := make([]interface{}, 0, len(tx.Inputs))
+	for _, input := range tx.Inputs {
+		inputs = append(inputs, map[string]interface{}{
+			"previousTxHash": hex.EncodeToString(input.PreviousTxHash[:]),
+			"index":          input.Index,
+		})
+	}
+
+	outputs := make([]interface{}, 0, len(tx.Outputs))
+	for _, output := range tx.Outputs {
+		outputs = append(outputs, map[string]interface{}{
+			"address": hex.EncodeToString(output.Address[:]),
+			"amount":  output.Amount,
+		})
+	}
+
+	signedTxReq := RPCRequest{
+		JSONRPC: "2.0",
+		Method:  "sendTransaction",
+		Params: map[string]interface{}{
+			"transaction": map[string]interface{}{
+				"from":      hex.EncodeToString(tx.From[:]),
+				"to":        hex.EncodeToString(tx.To[:]),
+				"amount":    tx.Amount,
+				"fee":       tx.Fee,
+				"nonce":     tx.Nonce,
+				"gasUsed":   tx.GasUsed,
+				"gasPrice":  tx.GasPrice,
+				"data":      hex.EncodeToString(tx.Data),
+				"signature": hex.EncodeToString(tx.Signature),
+				"publicKey": hex.EncodeToString(tx.PublicKey),
+				"hash":      hex.EncodeToString(tx.Hash[:]),
+				"inputs":    inputs,
+				"outputs":   outputs,
+			},
+		},
+		ID: 2,
+	}
+
+	signedReqData, err := json.Marshal(signedTxReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal signed transaction: %v", err)
+	}
+
+	resp2, err := client.Post(rpcURL, "application/json", bytes.NewBuffer(signedReqData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to send signed transaction: %v", err)
+	}
+	defer resp2.Body.Close()
+
+	body2, err := io.ReadAll(resp2.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read send response: %v", err)
+	}
+
+	var sendResp RPCResponse
+	if err := json.Unmarshal(body2, &sendResp); err != nil {
+		return nil, fmt.Errorf("failed to parse send response: %v", err)
+	}
+
+	if sendResp.Error != nil {
+		return nil, fmt.Errorf("RPC error: %s", sendResp.Error.Message)
+	}
+
+	result, ok := sendResp.Result.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid response format")
+	}
+
+	txHash, _ := result["txHash"].(string)
+	if txHash == "" {
+		// Fallback to hash field
+		if hash, ok := result["hash"].(string); ok {
+			txHash = hash
+		}
+	}
+
+	return &TransactionResponse{
+		Hash:    txHash,
+		From:    fromAddress,
+		To:      toAddress,
+		Amount:  amount,
+		Fee:     fee,
+		Nonce:   tx.Nonce,
+		Success: true,
+	}, nil
+}
+
+// formatTokenAmount formats token amount for display
+func formatTokenAmount(amount uint64) string {
+	// Format with thousand separators
+	amountStr := strconv.FormatUint(amount, 10)
+	if len(amountStr) <= 3 {
+		return amountStr
+	}
+	
+	// Add thousand separators
+	var result strings.Builder
+	for i, digit := range amountStr {
+		if i > 0 && (len(amountStr)-i)%3 == 0 {
+			result.WriteString(",")
+		}
+		result.WriteRune(digit)
+	}
+	return result.String()
+}
+
+// handleDeployToken handles token deployment
+func handleDeployToken(wm *WalletManager, args []string) {
+	fs := flag.NewFlagSet("deploy-token", flag.ExitOnError)
+	fromFlag := fs.String("from", "", "Creator wallet file or address")
+	nameFlag := fs.String("name", "", "Token name")
+	descriptionFlag := fs.String("description", "", "Token description")
+	totalSupplyFlag := fs.Uint64("totalSupply", 0, "Total supply (amount)")
+	rpcURLFlag := fs.String("rpc", "", "RPC server URL (default: http://localhost:16316/rpc)")
+	fs.Parse(args)
+
+	reader := bufio.NewReader(os.Stdin)
+	// Use default RPC if not provided
+	rpcURL := "http://localhost:16316/rpc"
+	if *rpcURLFlag != "" {
+		rpcURL = *rpcURLFlag
+	}
+
+	// Ensure RPC URL has /rpc endpoint
+	if !strings.HasSuffix(rpcURL, "/rpc") {
+		if !strings.HasSuffix(rpcURL, "/") {
+			rpcURL += "/rpc"
+		} else {
+			rpcURL += "rpc"
+		}
+	}
+
+	// Interactive mode if parameters are missing
+	var fromWallet *crypto.Wallet
+	var fromAddress string
+	var tokenName string
+	var tokenDescription string
+	var totalSupply uint64
+
+	// Get creator wallet
+	if *fromFlag != "" {
+		// Try to load as wallet file
+		if walletInfo, err := loadWallet(*fromFlag); err == nil {
+			bm := crypto.NewBIP39Manager()
+			fromWallet, err = bm.CreateWalletFromMnemonic(walletInfo.Mnemonic, "")
+			if err != nil {
+				log.Fatalf("Failed to create wallet from mnemonic: %v", err)
+			}
+			fromAddress, _ = fromWallet.GetAddressString()
+		} else {
+			// Assume it's an address
+			fromAddress = *fromFlag
+		}
+	} else if wm.wallet != nil {
+		// Use wallet from wallet manager if available
+		fromWallet = wm.wallet
+		fromAddress, _ = fromWallet.GetAddressString()
+	} else {
+		// Interactive selection
+		walletFile, wallet, err := selectWallet("Select creator wallet:")
+		if err != nil {
+			log.Fatal(err)
+		}
+		fromWallet = wallet
+		fromAddress, _ = wallet.GetAddressString()
+		fmt.Printf("Selected: %s (%s)\n", walletFile, fromAddress)
+	}
+
+	// Get token name
+	if *nameFlag != "" {
+		tokenName = *nameFlag
+	} else {
+		fmt.Print("Enter token name: ")
+		input, _ := reader.ReadString('\n')
+		tokenName = strings.TrimSpace(input)
+		if tokenName == "" {
+			log.Fatal("Token name is required")
+		}
+	}
+
+	// Get token description
+	if *descriptionFlag != "" {
+		tokenDescription = *descriptionFlag
+	} else {
+		fmt.Print("Enter token description: ")
+		input, _ := reader.ReadString('\n')
+		tokenDescription = strings.TrimSpace(input)
+	}
+
+	// Get total supply
+	if *totalSupplyFlag > 0 {
+		totalSupply = *totalSupplyFlag
+	} else {
+		fmt.Print("Enter total supply (amount): ")
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		parsed, err := strconv.ParseUint(input, 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid total supply: %v", err)
+		}
+		totalSupply = parsed
+	}
+
+	// Validate
+	if fromAddress == "" || tokenName == "" || totalSupply == 0 {
+		log.Fatal("Creator address, token name, and total supply are required")
+	}
+
+	// If we don't have a wallet for signing, we need to load it
+	if fromWallet == nil {
+		// Try to find wallet by address
+		wallets := getAvailableWallets()
+		for _, wf := range wallets {
+			walletInfo, err := loadWallet(wf)
+			if err != nil {
+				continue
+			}
+			if walletInfo.Address == fromAddress {
+				bm := crypto.NewBIP39Manager()
+				fromWallet, err = bm.CreateWalletFromMnemonic(walletInfo.Mnemonic, "")
+				if err != nil {
+					continue
+				}
+				break
+			}
+		}
+		if fromWallet == nil {
+			log.Fatal("Cannot find wallet for address. Please specify --from with wallet file")
+		}
+	}
+
+	// Deploy token via RPC
+	fmt.Printf("\nDeploying token '%s'...\n", tokenName)
+	fmt.Printf("Cost: 10 KALON (10,000,000 micro-KALON)\n\n")
+
+	txResp, err := deployToken(rpcURL, fromAddress, tokenName, tokenDescription, totalSupply, fromWallet)
+	if err != nil {
+		log.Fatalf("Failed to deploy token: %v", err)
+	}
+
+	// Output result
+	fmt.Printf("\n✅ Token deployed successfully!\n")
+	fmt.Printf("Token Name: %s\n", tokenName)
+	fmt.Printf("Description: %s\n", tokenDescription)
+	fmt.Printf("Total Supply: %d\n", totalSupply)
+	fmt.Printf("Creator: %s\n", fromAddress)
+	fmt.Printf("Transaction Hash: %s\n", txResp.Hash)
+	fmt.Printf("Fee: %.2f tKALON (%d micro-KALON)\n", float64(txResp.Fee)/1000000.0, txResp.Fee)
+	fmt.Printf("Nonce: %d\n", txResp.Nonce)
+	fmt.Printf("Success: %v\n", txResp.Success)
+}
+
+// deployToken deploys a token via RPC
+func deployToken(rpcURL string, creatorAddress, tokenName, tokenDescription string, totalSupply uint64, wallet *crypto.Wallet) (*TransactionResponse, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	// Step 1: Call deployToken RPC method
+	deployReq := RPCRequest{
+		JSONRPC: "2.0",
+		Method:  "deployToken",
+		Params: map[string]interface{}{
+			"name":        tokenName,
+			"description": tokenDescription,
+			"creator":     creatorAddress,
+			"totalSupply": totalSupply,
+		},
+		ID: 1,
+	}
+
+	reqData, err := json.Marshal(deployReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal deploy request: %v", err)
+	}
+
+	resp, err := client.Post(rpcURL, "application/json", bytes.NewBuffer(reqData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to deploy token: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read deploy response: %v", err)
+	}
+
+	var deployResp RPCResponse
+	if err := json.Unmarshal(body, &deployResp); err != nil {
+		return nil, fmt.Errorf("failed to parse deploy response: %v", err)
+	}
+
+	if deployResp.Error != nil {
+		return nil, fmt.Errorf("RPC error deploying token: %s", deployResp.Error.Message)
+	}
+
+	// Parse deploy response - should contain transaction data in "transaction" field
+	deployData, ok := deployResp.Result.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid deploy token response format")
+	}
+
+	// Get transaction from "transaction" field
+	txData, ok := deployData["transaction"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid transaction data in deploy response")
+	}
+
+	// Build transaction from server response
+	tx := &core.Transaction{}
+	
+	// CRITICAL: Store fee from transaction data BEFORE signing (for deployToken)
+	var transactionFee uint64
+
+	// Parse addresses
+	if fromStr, ok := txData["from"].(string); ok {
+		tx.From = core.AddressFromString(fromStr)
+	}
+	if toStr, ok := txData["to"].(string); ok {
+		tx.To = core.AddressFromString(toStr)
+	}
+
+	// Parse amounts
+	if amount, ok := txData["amount"].(float64); ok {
+		tx.Amount = uint64(amount)
+	}
+	if fee, ok := txData["fee"].(float64); ok {
+		tx.Fee = uint64(fee)
+		transactionFee = uint64(fee)
+	}
+	if nonce, ok := txData["nonce"].(float64); ok {
+		tx.Nonce = uint64(nonce)
+	}
+	if gasUsed, ok := txData["gasUsed"].(float64); ok {
+		tx.GasUsed = uint64(gasUsed)
+	}
+	if tx.GasUsed == 0 {
+		tx.GasUsed = 1
+	}
+	if gasPrice, ok := txData["gasPrice"].(float64); ok {
+		tx.GasPrice = uint64(gasPrice)
+	}
+	if tx.GasPrice == 0 {
+		if tx.Fee > 0 {
+			tx.GasPrice = tx.Fee
+		} else {
+			tx.GasPrice = 100000
+		}
+	}
+
+	// Parse data (token deployment data)
+	if dataStr, ok := txData["data"].(string); ok {
+		dataBytes, err := hex.DecodeString(dataStr)
+		if err == nil {
+			tx.Data = dataBytes
+		}
+	}
+
+	// Parse inputs
+	if inputs, ok := txData["inputs"].([]interface{}); ok {
+		tx.Inputs = make([]core.TxInput, 0, len(inputs))
+		for _, inputData := range inputs {
+			if inputMap, ok := inputData.(map[string]interface{}); ok {
+				var input core.TxInput
+				if prevHashStr, ok := inputMap["previousTxHash"].(string); ok {
+					prevHashBytes, err := hex.DecodeString(prevHashStr)
+					if err == nil && len(prevHashBytes) == 32 {
+						copy(input.PreviousTxHash[:], prevHashBytes)
+					}
+				}
+				if index, ok := inputMap["index"].(float64); ok {
+					input.Index = uint32(index)
+				}
+				tx.Inputs = append(tx.Inputs, input)
+			}
+		}
+	}
+
+	// Parse outputs
+	if outputs, ok := txData["outputs"].([]interface{}); ok {
+		tx.Outputs = make([]core.TxOutput, 0, len(outputs))
+		for _, outputData := range outputs {
+			if outputMap, ok := outputData.(map[string]interface{}); ok {
+				var output core.TxOutput
+				if addrStr, ok := outputMap["address"].(string); ok {
+					output.Address = core.AddressFromString(addrStr)
+				}
+				if amount, ok := outputMap["amount"].(float64); ok {
+					output.Amount = uint64(amount)
+				}
+				tx.Outputs = append(tx.Outputs, output)
+			}
+		}
+	}
+
+	// Parse timestamp
+	if timestamp, ok := txData["timestamp"].(float64); ok {
+		tx.Timestamp = time.Unix(int64(timestamp), 0)
+	} else {
+		tx.Timestamp = time.Now()
+	}
+
+	// Sign transaction
+	if err := wallet.SignTransaction(tx); err != nil {
+		return nil, fmt.Errorf("failed to sign transaction: %v", err)
+	}
+
+	// Calculate hash
+	tx.Hash = tx.CalculateHash()
+
+	// Step 2: Send signed transaction
+	// Serialize inputs
+	inputs := make([]interface{}, 0, len(tx.Inputs))
+	for _, input := range tx.Inputs {
+		inputs = append(inputs, map[string]interface{}{
+			"previousTxHash": hex.EncodeToString(input.PreviousTxHash[:]),
+			"index":          input.Index,
+		})
+	}
+
+	// Serialize outputs
+	outputs := make([]interface{}, 0, len(tx.Outputs))
+	for _, output := range tx.Outputs {
+		outputs = append(outputs, map[string]interface{}{
+			"address": hex.EncodeToString(output.Address[:]),
+			"amount":  output.Amount,
+		})
+	}
+
+	sendReq := RPCRequest{
+		JSONRPC: "2.0",
+		Method:  "sendTransaction",
+		Params: map[string]interface{}{
+			"transaction": map[string]interface{}{
+				"from":      hex.EncodeToString(tx.From[:]),
+				"to":        hex.EncodeToString(tx.To[:]),
+				"amount":    tx.Amount,
+				"fee":       tx.Fee,
+				"nonce":     tx.Nonce,
+				"gasUsed":   tx.GasUsed,
+				"gasPrice":  tx.GasPrice,
+				"data":      hex.EncodeToString(tx.Data),
+				"signature": hex.EncodeToString(tx.Signature),
+				"publicKey": hex.EncodeToString(tx.PublicKey),
+				"inputs":    inputs,
+				"outputs":   outputs,
+				"timestamp": tx.Timestamp.Unix(),
+			},
+		},
+		ID: 2,
+	}
+
+	reqData, err = json.Marshal(sendReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal send request: %v", err)
+	}
+
+	resp, err = client.Post(rpcURL, "application/json", bytes.NewBuffer(reqData))
+	if err != nil {
+		return nil, fmt.Errorf("failed to send transaction: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read send response: %v", err)
+	}
+
+	var sendResp RPCResponse
+	if err := json.Unmarshal(body, &sendResp); err != nil {
+		return nil, fmt.Errorf("failed to parse send response: %v", err)
+	}
+
+	if sendResp.Error != nil {
+		return nil, fmt.Errorf("RPC error sending transaction: %s", sendResp.Error.Message)
+	}
+
+	// Parse send response
+	sendData, ok := sendResp.Result.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("invalid send transaction response format")
+	}
+
+	// Build response
+	txResp := &TransactionResponse{
+		Success: true,
+	}
+
+	// RPC returns "txHash", but also check "hash" for compatibility
+	if hashStr, ok := sendData["txHash"].(string); ok {
+		txResp.Hash = hashStr
+	} else if hashStr, ok := sendData["hash"].(string); ok {
+		txResp.Hash = hashStr
+	}
+	if fromStr, ok := sendData["from"].(string); ok {
+		txResp.From = fromStr
+	}
+	if toStr, ok := sendData["to"].(string); ok {
+		txResp.To = toStr
+	}
+	if amount, ok := sendData["amount"].(float64); ok {
+		txResp.Amount = uint64(amount)
+	}
+	// CRITICAL: Fee is not returned by sendTransaction RPC, use the fee from the original transaction
+	if transactionFee > 0 {
+		txResp.Fee = transactionFee
+	} else if fee, ok := sendData["fee"].(float64); ok {
+		txResp.Fee = uint64(fee)
+	} else {
+		// Fallback: use fee from tx object if available
+		txResp.Fee = tx.Fee
+	}
+	if nonce, ok := sendData["nonce"].(float64); ok {
+		txResp.Nonce = uint64(nonce)
+	} else {
+		txResp.Nonce = tx.Nonce
+	}
+
+	return txResp, nil
 }
 
 // handleInfo handles wallet info display
@@ -764,7 +1803,8 @@ func handleList(args []string) {
 }
 
 // sendTransaction sends a transaction via RPC
-// Uses prepareTransaction to get transaction structure, signs it, then sends it
+// SECURITY: Uses prepareTransaction -> local signing -> sendTransaction flow
+// This ensures the private key never leaves the client
 func sendTransaction(rpcURL string, txReq *TransactionRequest, wallet *crypto.Wallet) (*TransactionResponse, error) {
 	// Ensure RPC URL has /rpc endpoint
 	if !strings.HasSuffix(rpcURL, "/rpc") {
@@ -775,7 +1815,7 @@ func sendTransaction(rpcURL string, txReq *TransactionRequest, wallet *crypto.Wa
 		}
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 
 	// Step 1: Prepare transaction from server (get UTXOs and structure)
 	prepareReq := RPCRequest{
@@ -792,7 +1832,7 @@ func sendTransaction(rpcURL string, txReq *TransactionRequest, wallet *crypto.Wa
 
 	reqData, err := json.Marshal(prepareReq)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %v", err)
+		return nil, fmt.Errorf("failed to marshal prepare request: %v", err)
 	}
 
 	resp, err := client.Post(rpcURL, "application/json", bytes.NewBuffer(reqData))
@@ -803,102 +1843,12 @@ func sendTransaction(rpcURL string, txReq *TransactionRequest, wallet *crypto.Wa
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %v", err)
+		return nil, fmt.Errorf("failed to read prepare response: %v", err)
 	}
 
 	var prepareResp RPCResponse
 	if err := json.Unmarshal(body, &prepareResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %v", err)
-	}
-
-	// If prepareTransaction is not available, fall back to creating transaction locally
-	if prepareResp.Error != nil && strings.Contains(prepareResp.Error.Message, "Method not found") {
-		// Fallback: Create transaction locally (without UTXOs - server will validate)
-		fromAddr := core.AddressFromString(txReq.From)
-		toAddr := core.AddressFromString(txReq.To)
-
-		tx := &core.Transaction{
-			From:      fromAddr,
-			To:        toAddr,
-			Amount:    txReq.Amount,
-			Fee:       txReq.Fee,
-			Nonce:     0, // Server will set this
-			GasUsed:   1,
-			GasPrice:  txReq.Fee,
-			Data:      []byte{},
-			Timestamp: time.Now(),
-		}
-
-		// Calculate hash
-		tx.Hash = tx.CalculateHash()
-
-		// Sign transaction
-		if err := wallet.SignTransaction(tx); err != nil {
-			return nil, fmt.Errorf("failed to sign transaction: %v", err)
-		}
-
-		// Send signed transaction
-		signedTxReq := RPCRequest{
-			JSONRPC: "2.0",
-			Method:  "sendTransaction",
-			Params: map[string]interface{}{
-				"transaction": map[string]interface{}{
-					"from":      hex.EncodeToString(tx.From[:]),
-					"to":        hex.EncodeToString(tx.To[:]),
-					"amount":    tx.Amount,
-					"fee":       tx.Fee,
-					"nonce":     tx.Nonce,
-					"gasUsed":   tx.GasUsed,
-					"gasPrice":  tx.GasPrice,
-					"data":      hex.EncodeToString(tx.Data),
-					"signature": hex.EncodeToString(tx.Signature),
-					"publicKey": hex.EncodeToString(tx.PublicKey),
-					"hash":      hex.EncodeToString(tx.Hash[:]),
-				},
-			},
-			ID: 2,
-		}
-
-		signedReqData, err := json.Marshal(signedTxReq)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal signed transaction: %v", err)
-		}
-
-		resp2, err := client.Post(rpcURL, "application/json", bytes.NewBuffer(signedReqData))
-		if err != nil {
-			return nil, fmt.Errorf("failed to send signed transaction: %v", err)
-		}
-		defer resp2.Body.Close()
-
-		body2, err := io.ReadAll(resp2.Body)
-		if err != nil {
-			return nil, fmt.Errorf("failed to read response: %v", err)
-		}
-
-		var sendResp RPCResponse
-		if err := json.Unmarshal(body2, &sendResp); err != nil {
-			return nil, fmt.Errorf("failed to parse response: %v", err)
-		}
-
-		if sendResp.Error != nil {
-			return nil, fmt.Errorf("RPC error: %s", sendResp.Error.Message)
-		}
-
-		result, ok := sendResp.Result.(map[string]interface{})
-		if !ok {
-			return nil, fmt.Errorf("invalid response format")
-		}
-
-		txHash, _ := result["txHash"].(string)
-		return &TransactionResponse{
-			Hash:    txHash,
-			From:    txReq.From,
-			To:      txReq.To,
-			Amount:  txReq.Amount,
-			Fee:     txReq.Fee,
-			Nonce:   tx.Nonce,
-			Success: true,
-		}, nil
+		return nil, fmt.Errorf("failed to parse prepare response: %v", err)
 	}
 
 	if prepareResp.Error != nil {
@@ -935,19 +1885,17 @@ func sendTransaction(rpcURL string, txReq *TransactionRequest, wallet *crypto.Wa
 	if gasUsed, ok := txData["gasUsed"].(float64); ok {
 		tx.GasUsed = uint64(gasUsed)
 	}
-	// Set default gas usage if 0 or not provided
 	if tx.GasUsed == 0 {
 		tx.GasUsed = 1
 	}
 	if gasPrice, ok := txData["gasPrice"].(float64); ok {
 		tx.GasPrice = uint64(gasPrice)
 	}
-	// Set default gas price if 0 or not provided (should match fee for simplicity)
 	if tx.GasPrice == 0 {
 		if tx.Fee > 0 {
 			tx.GasPrice = tx.Fee
 		} else {
-			tx.GasPrice = 100000 // Default gas price
+			tx.GasPrice = 100000
 		}
 	}
 
@@ -958,22 +1906,41 @@ func sendTransaction(rpcURL string, txReq *TransactionRequest, wallet *crypto.Wa
 		}
 	}
 
-	// Parse inputs and outputs FIRST (before hash calculation)
+	// Parse inputs and outputs
 	if inputsData, ok := txData["inputs"].([]interface{}); ok {
-		for _, inputData := range inputsData {
+		log.Printf("🔵 [DEBUG] Parsing %d inputs from prepareTransaction response", len(inputsData))
+		for i, inputData := range inputsData {
 			if inputMap, ok := inputData.(map[string]interface{}); ok {
 				input := core.TxInput{}
 				if prevTxHashStr, ok := inputMap["previousTxHash"].(string); ok {
 					if prevTxHashBytes, err := hex.DecodeString(prevTxHashStr); err == nil && len(prevTxHashBytes) == 32 {
 						copy(input.PreviousTxHash[:], prevTxHashBytes)
+						log.Printf("🔵 [DEBUG] Input[%d]: previousTxHash=%x, index=%d", i, input.PreviousTxHash, input.Index)
+					} else {
+						log.Printf("❌ [DEBUG] Input[%d]: Failed to decode previousTxHash: %s (error: %v, len: %d)", i, prevTxHashStr, err, len(prevTxHashBytes))
+						// Skip this input if hash is invalid
+						continue
 					}
+				} else {
+					log.Printf("❌ [DEBUG] Input[%d]: No previousTxHash field found", i)
+					// Skip this input if no hash field
+					continue
 				}
 				if index, ok := inputMap["index"].(float64); ok {
 					input.Index = uint32(index)
 				}
 				tx.Inputs = append(tx.Inputs, input)
+			} else {
+				log.Printf("❌ [DEBUG] Input[%d]: Failed to parse input map", i)
 			}
 		}
+		log.Printf("🔵 [DEBUG] Successfully parsed %d inputs", len(tx.Inputs))
+		// Log each input to verify they were parsed correctly
+		for i, input := range tx.Inputs {
+			log.Printf("🔵 [DEBUG] Parsed Input[%d]: previousTxHash=%x, index=%d", i, input.PreviousTxHash, input.Index)
+		}
+	} else {
+		log.Printf("⚠️ [DEBUG] No inputs array found in prepareTransaction response")
 	}
 
 	if outputsData, ok := txData["outputs"].([]interface{}); ok {
@@ -991,15 +1958,7 @@ func sendTransaction(rpcURL string, txReq *TransactionRequest, wallet *crypto.Wa
 		}
 	}
 
-	// Parse timestamp
-	if timestamp, ok := txData["timestamp"].(float64); ok {
-		tx.Timestamp = time.Unix(int64(timestamp), 0)
-	} else {
-		tx.Timestamp = time.Now()
-	}
-
 	// Parse hash from prepareTransaction response (if provided)
-	// This hash was calculated by the server and should be used as-is
 	if hashStr, ok := txData["hash"].(string); ok {
 		if hashBytes, err := hex.DecodeString(hashStr); err == nil && len(hashBytes) == 32 {
 			copy(tx.Hash[:], hashBytes)
@@ -1012,20 +1971,31 @@ func sendTransaction(rpcURL string, txReq *TransactionRequest, wallet *crypto.Wa
 		tx.Hash = tx.CalculateHash()
 	}
 
-	// Sign transaction (signature is over the transaction data, including hash)
+	// Step 2: Sign transaction locally (SECURITY: Private key never leaves client)
 	if err := wallet.SignTransaction(tx); err != nil {
 		return nil, fmt.Errorf("failed to sign transaction: %v", err)
 	}
 
-	// Step 2: Send signed transaction
+	// Step 3: Send signed transaction
 	// Serialize inputs
+	log.Printf("🔵 [DEBUG] Serializing %d inputs for sendTransaction", len(tx.Inputs))
+	if len(tx.Inputs) == 0 {
+		log.Printf("❌ [DEBUG] ERROR: Transaction has NO INPUTS! This will cause UTXO errors!")
+		return nil, fmt.Errorf("transaction has no inputs - cannot send transaction without UTXO references")
+	}
 	inputs := make([]interface{}, 0, len(tx.Inputs))
-	for _, input := range tx.Inputs {
+	for i, input := range tx.Inputs {
+		prevTxHashHex := hex.EncodeToString(input.PreviousTxHash[:])
+		log.Printf("🔵 [DEBUG] Serializing Input[%d]: previousTxHash=%x (hex: %s), index=%d", i, input.PreviousTxHash, prevTxHashHex, input.Index)
+		if input.PreviousTxHash == (core.Hash{}) {
+			log.Printf("❌ [DEBUG] ERROR: Input[%d] has EMPTY previousTxHash! This will cause UTXO errors!", i)
+		}
 		inputs = append(inputs, map[string]interface{}{
-			"previousTxHash": hex.EncodeToString(input.PreviousTxHash[:]),
+			"previousTxHash": prevTxHashHex,
 			"index":          input.Index,
 		})
 	}
+	log.Printf("🔵 [DEBUG] Serialized %d inputs for JSON", len(inputs))
 
 	// Serialize outputs
 	outputs := make([]interface{}, 0, len(tx.Outputs))
@@ -1072,12 +2042,12 @@ func sendTransaction(rpcURL string, txReq *TransactionRequest, wallet *crypto.Wa
 
 	body2, err := io.ReadAll(resp2.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %v", err)
+		return nil, fmt.Errorf("failed to read send response: %v", err)
 	}
 
 	var sendResp RPCResponse
 	if err := json.Unmarshal(body2, &sendResp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %v", err)
+		return nil, fmt.Errorf("failed to parse send response: %v", err)
 	}
 
 	if sendResp.Error != nil {
@@ -1110,14 +2080,16 @@ func usage() {
 	fmt.Println("  kalon-wallet <command> [flags]")
 	fmt.Println()
 	fmt.Println("Commands:")
-	fmt.Println("  create     Create a new wallet")
-	fmt.Println("  import     Import wallet from mnemonic")
-	fmt.Println("  list       List all available wallets")
-	fmt.Println("  export     Export wallet information")
-	fmt.Println("  balance    Check wallet balance")
-	fmt.Println("  send       Send transaction")
-	fmt.Println("  info       Show wallet information")
-	fmt.Println("  help       Show this help message")
+	fmt.Println("  create        Create a new wallet")
+	fmt.Println("  import        Import wallet from mnemonic")
+	fmt.Println("  list          List all available wallets")
+	fmt.Println("  export        Export wallet information")
+	fmt.Println("  balance       Check wallet balance")
+	fmt.Println("  send          Send transaction")
+	fmt.Println("  send-token    Send token transfer")
+	fmt.Println("  deploy-token  Deploy a new token (costs 10 KALON)")
+	fmt.Println("  info          Show wallet information")
+	fmt.Println("  help          Show this help message")
 	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  kalon-wallet create --name miner")

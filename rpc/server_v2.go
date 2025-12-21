@@ -441,6 +441,8 @@ func (s *ServerV2) handleRPCMethod(req *RPCRequest) *RPCResponse {
 		return s.handleGetAddressInfo(req)
 	case "getAddressTransactions":
 		return s.handleGetAddressTransactions(req)
+	case "getTokenBalances":
+		return s.handleGetTokenBalances(req)
 	case "getBlockByHash":
 		return s.handleGetBlockByHash(req)
 	case "getBlockByNumber":
@@ -455,6 +457,16 @@ func (s *ServerV2) handleRPCMethod(req *RPCRequest) *RPCResponse {
 		return s.handleRegisterSeedNode(req)
 	case "getSeedNodeRegistrations":
 		return s.handleGetSeedNodeRegistrations(req)
+	case "deployToken":
+		return s.handleDeployToken(req)
+	case "checkTokenName":
+		return s.handleCheckTokenName(req)
+	case "getTokenBalance":
+		return s.handleGetTokenBalance(req)
+	case "sendToken":
+		return s.handleSendToken(req)
+	case "getDeployedTokens":
+		return s.handleGetDeployedTokens(req)
 	case "updateSeedNodeStatus":
 		return s.handleUpdateSeedNodeStatus(req)
 	case "getSeedNodeStatus":
@@ -907,9 +919,7 @@ func (s *ServerV2) handleCreateBlockTemplateV2(req *RPCRequest) *RPCResponse {
 			"parentHash":   hex.EncodeToString(block.Header.ParentHash[:]),
 			"timestamp":    block.Header.Timestamp.Unix(),
 			"miner":        hex.EncodeToString(block.Header.Miner[:]),
-			"networkFee":   block.Header.NetworkFee,                        // CRITICAL: Include networkFee for miner
-			"treasuryFee":  block.Header.TreasuryFee,                       // CRITICAL: Include treasuryFee for miner
-			"merkleRoot":   hex.EncodeToString(block.Header.MerkleRoot[:]), // CRITICAL: Include merkleRoot for miner
+			"merkleRoot":   hex.EncodeToString(block.Header.MerkleRoot[:]),
 			"transactions": txList,
 		},
 		ID: req.ID,
@@ -1130,18 +1140,56 @@ func (s *ServerV2) parseBlockData(data map[string]interface{}) (*core.Block, err
 				// Parse UTXO fields
 				// Block reward transactions have no inputs, so this is optional
 				if inputs, ok := txMap["inputs"].([]interface{}); ok {
+					core.LogInfo("🔵 [DEBUG] parseBlockData - Found inputs array with %d elements", len(inputs))
 					for i, inputData := range inputs {
 						if inputMap, ok := inputData.(map[string]interface{}); ok {
 							input := core.TxInput{}
-							if prevTxHashStr, ok := inputMap["previousTxHash"].(string); ok {
-								if prevTxHashBytes, err := hex.DecodeString(prevTxHashStr); err == nil && len(prevTxHashBytes) == 32 {
-									copy(input.PreviousTxHash[:], prevTxHashBytes)
-								} else {
-									// Skip this input if hash is invalid
-									continue
+							// CRITICAL: Handle previousTxHash as string, byte array, or []interface{}
+							var prevTxHashBytes []byte
+							var foundHash bool
+							
+							if str, ok := inputMap["previousTxHash"].(string); ok {
+								// Hex string - decode it
+								if bytes, err := hex.DecodeString(str); err == nil && len(bytes) == 32 {
+									prevTxHashBytes = bytes
+									foundHash = true
 								}
+							} else if bytes, ok := inputMap["previousTxHash"].([]byte); ok {
+								// Already a byte array
+								if len(bytes) == 32 {
+									prevTxHashBytes = bytes
+									foundHash = true
+								}
+							} else if arr, ok := inputMap["previousTxHash"].([]interface{}); ok {
+								// Array of numbers (JSON deserializes bytes as []interface{} with numbers)
+								if len(arr) == 32 {
+									prevTxHashBytes = make([]byte, 32)
+									allValid := true
+									for j, v := range arr {
+										if num, ok := v.(float64); ok && num >= 0 && num <= 255 {
+											prevTxHashBytes[j] = byte(num)
+										} else {
+											allValid = false
+											break
+										}
+									}
+									if allValid {
+										foundHash = true
+									}
+								}
+							}
+							
+							if foundHash {
+								copy(input.PreviousTxHash[:], prevTxHashBytes)
+								core.LogInfo("🔵 [DEBUG] parseBlockData - Input[%d]: previousTxHash=%x, index=%d", i, input.PreviousTxHash, input.Index)
 							} else {
-								// Skip this input if no hash field
+								// Log all keys in the inputMap for debugging
+								keys := make([]string, 0, len(inputMap))
+								for k := range inputMap {
+									keys = append(keys, k)
+								}
+								core.LogError("❌ [DEBUG] parseBlockData - Input[%d]: Failed to parse previousTxHash (type: %T, value: %v, inputMap keys: %v)", i, inputMap["previousTxHash"], inputMap["previousTxHash"], keys)
+								// Skip this input if hash is invalid
 								continue
 							}
 							if index, ok := inputMap["index"].(float64); ok {
@@ -1151,8 +1199,11 @@ func (s *ServerV2) parseBlockData(data map[string]interface{}) (*core.Block, err
 								input.Signature = signature
 							}
 							tx.Inputs = append(tx.Inputs, input)
+						} else {
+							core.LogError("❌ [DEBUG] parseBlockData - Input[%d]: Failed to parse input map (type: %T)", i, inputData)
 						}
 					}
+					core.LogInfo("🔵 [DEBUG] parseBlockData - Successfully parsed %d inputs", len(tx.Inputs))
 				}
 				// Note: No inputs is normal for block reward transactions
 
@@ -1253,28 +1304,16 @@ func (s *ServerV2) parseBlockData(data map[string]interface{}) (*core.Block, err
 		miner = core.AddressFromString(minerStr)
 	}
 
-	// Parse networkFee and treasuryFee from block data
-	var networkFee uint64 = 0
-	if networkFeeFloat, ok := data["networkFee"].(float64); ok {
-		networkFee = uint64(networkFeeFloat)
-	}
-	var treasuryFee uint64 = 0
-	if treasuryFeeFloat, ok := data["treasuryFee"].(float64); ok {
-		treasuryFee = uint64(treasuryFeeFloat)
-	}
-
 	// Create block with transactions
 	block := &core.Block{
 		Header: core.BlockHeader{
-			Number:      uint64(number),
-			Difficulty:  uint64(difficulty),
-			Nonce:       uint64(nonce),
-			Timestamp:   time.Unix(int64(timestamp), 0),
-			MerkleRoot:  merkleRoot,  // Parse merkle root from block data
-			TxCount:     txCount,     // Parse tx count from block data
-			Miner:       miner,       // Parse miner address
-			NetworkFee:  networkFee,  // CRITICAL: Parse networkFee from block data
-			TreasuryFee: treasuryFee, // CRITICAL: Parse treasuryFee from block data
+			Number:     uint64(number),
+			Difficulty: uint64(difficulty),
+			Nonce:      uint64(nonce),
+			Timestamp:  time.Unix(int64(timestamp), 0),
+			MerkleRoot: merkleRoot, // Parse merkle root from block data
+			TxCount:    txCount,    // Parse tx count from block data
+			Miner:      miner,      // Parse miner address
 		},
 		Txs: transactions, // Use parsed transactions
 	}
@@ -1310,19 +1349,8 @@ func (s *ServerV2) handleGetMiningInfo(req *RPCRequest) *RPCResponse {
 	}
 	blockHistory := s.blockchain.GetBlockHistoryForDifficulty(bestBlock.Header.Number + 1)
 
-	// IMPORTANT: Include current time in blockHistory for RPC calls
+	// CalculateDifficulty will extend blockHistory itself with current time if needed
 	// This ensures miners get the correct difficulty immediately, even if no blocks were found recently
-	// Without this, miners would mine with old difficulty until they find a block
-	currentTime := time.Now()
-	if len(blockHistory) > 0 {
-		// Extend blockHistory with current time as "virtual block"
-		// This allows CalculateDifficulty to consider time since last block
-		extendedHistory := make([]time.Time, len(blockHistory)+1)
-		copy(extendedHistory, blockHistory)
-		extendedHistory[len(blockHistory)] = currentTime
-		blockHistory = extendedHistory
-	}
-
 	difficulty := consensusManager.CalculateDifficulty(bestBlock.Header.Number+1, bestBlock, blockHistory)
 
 	// Get max mining threads from genesis config
@@ -1475,8 +1503,10 @@ func (s *ServerV2) handlePrepareTransaction(req *RPCRequest) *RPCResponse {
 
 // handleSendTransaction handles sendTransaction requests
 func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
+	core.LogInfo("🔵 [DEBUG] handleSendTransaction START - Request ID: %d", req.ID)
 	params, ok := req.Params.(map[string]interface{})
 	if !ok {
+		core.LogInfo("🔴 [DEBUG] handleSendTransaction - Invalid params format")
 		return &RPCResponse{
 			JSONRPC: "2.0",
 			Error: &RPCError{
@@ -1486,6 +1516,7 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 			ID: req.ID,
 		}
 	}
+	core.LogInfo("🔵 [DEBUG] handleSendTransaction - Params parsed successfully")
 
 	// Check if a fully signed transaction is provided
 	if txData, ok := params["transaction"].(map[string]interface{}); ok {
@@ -1547,20 +1578,45 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 		}
 
 		// Parse inputs
+		core.LogInfo("🔵 [DEBUG] Checking for inputs in transaction data...")
 		if inputsData, ok := txData["inputs"].([]interface{}); ok {
-			for _, inputData := range inputsData {
+			core.LogInfo("🔵 [DEBUG] Found inputs array with %d elements", len(inputsData))
+			for i, inputData := range inputsData {
 				if inputMap, ok := inputData.(map[string]interface{}); ok {
 					input := core.TxInput{}
 					if prevTxHashStr, ok := inputMap["previousTxHash"].(string); ok {
 						if prevTxHashBytes, err := hex.DecodeString(prevTxHashStr); err == nil && len(prevTxHashBytes) == 32 {
 							copy(input.PreviousTxHash[:], prevTxHashBytes)
+							core.LogInfo("🔵 [DEBUG] Input[%d]: previousTxHash=%x, index=%d", i, input.PreviousTxHash, input.Index)
+						} else {
+							core.LogError("❌ [DEBUG] Input[%d]: Failed to decode previousTxHash: %s (error: %v, len: %d)", i, prevTxHashStr, err, len(prevTxHashBytes))
+							// Skip this input if hash is invalid
+							continue
 						}
+					} else {
+						core.LogError("❌ [DEBUG] Input[%d]: No previousTxHash field found", i)
+						// Skip this input if no hash field
+						continue
 					}
 					if index, ok := inputMap["index"].(float64); ok {
 						input.Index = uint32(index)
 					}
 					tx.Inputs = append(tx.Inputs, input)
+				} else {
+					core.LogError("❌ [DEBUG] Input[%d]: Failed to parse input map", i)
 				}
+			}
+			core.LogInfo("🔵 [DEBUG] Successfully parsed %d inputs", len(tx.Inputs))
+		} else {
+			core.LogWarn("⚠️ [DEBUG] No inputs array found in transaction data - checking if inputs key exists...")
+			if _, exists := txData["inputs"]; exists {
+				core.LogError("❌ [DEBUG] Inputs key exists but is not an array! Type: %T, Value: %v", txData["inputs"], txData["inputs"])
+			} else {
+				keys := make([]string, 0, len(txData))
+				for k := range txData {
+					keys = append(keys, k)
+				}
+				core.LogError("❌ [DEBUG] Inputs key does not exist in transaction data! Available keys: %v", keys)
 			}
 		}
 
@@ -1581,8 +1637,12 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 		}
 
 		// Debug: Log transaction details before validation
-		core.LogInfo("Transaction before validation - From: %s, To: %s, Amount: %d, Fee: %d, Nonce: %d, Inputs: %d, Outputs: %d, HasSignature: %v, HasPublicKey: %v",
-			hex.EncodeToString(tx.From[:]), hex.EncodeToString(tx.To[:]), tx.Amount, tx.Fee, tx.Nonce, len(tx.Inputs), len(tx.Outputs), len(tx.Signature) > 0, len(tx.PublicKey) > 0)
+		core.LogInfo("🔵 [DEBUG] Transaction parsed - From: %s, To: %s, Amount: %d, Fee: %d, Nonce: %d, Inputs: %d, Outputs: %d, HasSignature: %v, HasPublicKey: %v, Hash: %x",
+			hex.EncodeToString(tx.From[:]), hex.EncodeToString(tx.To[:]), tx.Amount, tx.Fee, tx.Nonce, len(tx.Inputs), len(tx.Outputs), len(tx.Signature) > 0, len(tx.PublicKey) > 0, tx.Hash)
+		// Log input details
+		for i, input := range tx.Inputs {
+			core.LogInfo("🔵 [DEBUG] Input[%d]: previousTxHash=%x, index=%d", i, input.PreviousTxHash, input.Index)
+		}
 
 		// Check transaction size BEFORE validation (DoS protection)
 		txSize := estimateTransactionSize(&tx)
@@ -1600,9 +1660,10 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 		}
 
 		// Validate signed transaction
+		core.LogInfo("🔵 [DEBUG] Starting transaction validation...")
 		consensusManager := core.NewConsensusManager(s.blockchain.GetGenesis())
 		if err := consensusManager.ValidateTransaction(&tx); err != nil {
-			core.LogInfo("Transaction validation failed: %v", err)
+			core.LogInfo("🔴 [DEBUG] Transaction validation failed: %v", err)
 			return &RPCResponse{
 				JSONRPC: "2.0",
 				Error: &RPCError{
@@ -1615,11 +1676,13 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 		}
 
 		// Debug: Log transaction details before adding to mempool
-		core.LogInfo("Signed transaction received - From: %s, To: %s, Amount: %d, Hash: %x, Inputs: %d, Outputs: %d",
+		core.LogInfo("✅ [DEBUG] Transaction validation passed - From: %s, To: %s, Amount: %d, Hash: %x, Inputs: %d, Outputs: %d",
 			hex.EncodeToString(tx.From[:]), hex.EncodeToString(tx.To[:]), tx.Amount, tx.Hash, len(tx.Inputs), len(tx.Outputs))
 
 		// Add to mempool with nonce validation
+		core.LogInfo("🔵 [DEBUG] Calling AddTransactionToMempool...")
 		if err := s.blockchain.AddTransactionToMempool(&tx); err != nil {
+			core.LogInfo("🔴 [DEBUG] AddTransactionToMempool failed: %v", err)
 			return &RPCResponse{
 				JSONRPC: "2.0",
 				Error: &RPCError{
@@ -1631,6 +1694,7 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 			}
 		}
 
+		core.LogInfo("✅ [DEBUG] Transaction successfully added to mempool - Hash: %x", tx.Hash)
 		return &RPCResponse{
 			JSONRPC: "2.0",
 			Result: map[string]interface{}{
@@ -1640,6 +1704,7 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 			ID: req.ID,
 		}
 	}
+	core.LogInfo("🔴 [DEBUG] handleSendTransaction - No transaction object found, using legacy mode")
 
 	// Parse transaction fields (legacy mode - server creates transaction)
 	fromStr, _ := params["from"].(string)
@@ -1662,10 +1727,13 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 	// Get addresses
 	fromAddr := core.AddressFromString(fromStr)
 	toAddr := core.AddressFromString(toStr)
+	core.LogInfo("🔵 [DEBUG] Legacy mode - From: %s, To: %s, Amount: %d, Fee: %d", fromStr, toStr, uint64(amount), uint64(fee))
 
 	// Create transaction from UTXOs
+	core.LogInfo("🔵 [DEBUG] Legacy mode - Calling CreateTransaction...")
 	tx, err := s.blockchain.CreateTransaction(fromAddr, toAddr, uint64(amount), uint64(fee))
 	if err != nil {
+		core.LogInfo("🔴 [DEBUG] Legacy mode - CreateTransaction failed: %v", err)
 		return &RPCResponse{
 			JSONRPC: "2.0",
 			Error: &RPCError{
@@ -1677,7 +1745,7 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 		}
 	}
 
-	core.LogInfo("Transaction created - From: %s, To: %s, Amount: %d, Hash: %x", fromStr, toStr, tx.Amount, tx.Hash)
+	core.LogInfo("✅ [DEBUG] Legacy mode - Transaction created - From: %s, To: %s, Amount: %d, Hash: %x, Inputs: %d, Outputs: %d, HasSignature: %v", fromStr, toStr, tx.Amount, tx.Hash, len(tx.Inputs), len(tx.Outputs), len(tx.Signature) > 0)
 
 	// Check transaction size BEFORE validation (DoS protection)
 	txSize := estimateTransactionSize(tx)
@@ -1698,8 +1766,10 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 	// This is expected behavior - client should send signed transaction
 	// For now, we skip validation for server-created transactions (legacy mode)
 	// In production, all transactions should be signed by client
+	core.LogInfo("🔵 [DEBUG] Legacy mode - Starting transaction validation...")
 	consensusManager := core.NewConsensusManager(s.blockchain.GetGenesis())
 	if err := consensusManager.ValidateTransaction(tx); err != nil {
+		core.LogInfo("🔴 [DEBUG] Legacy mode - Transaction validation failed: %v", err)
 		// Return error indicating transaction needs to be signed
 		return &RPCResponse{
 			JSONRPC: "2.0",
@@ -1712,8 +1782,22 @@ func (s *ServerV2) handleSendTransaction(req *RPCRequest) *RPCResponse {
 		}
 	}
 
+	core.LogInfo("✅ [DEBUG] Legacy mode - Transaction validation passed, adding to mempool...")
 	// Add to mempool
-	s.blockchain.GetMempool().AddTransaction(tx)
+	err = s.blockchain.GetMempool().AddTransaction(tx)
+	if err != nil {
+		core.LogInfo("🔴 [DEBUG] Legacy mode - Failed to add to mempool: %v", err)
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Failed to add transaction to mempool",
+				Data:    err.Error(),
+			},
+			ID: req.ID,
+		}
+	}
+	core.LogInfo("✅ [DEBUG] Legacy mode - Transaction successfully added to mempool")
 
 	// Return transaction hash
 	return &RPCResponse{
@@ -3188,6 +3272,16 @@ func (s *ServerV2) handleGetAddressInfo(req *RPCRequest) *RPCResponse {
 		}
 	}
 
+	// Get token balances for this address
+	tokenBalances := make(map[string]uint64)
+	tokens := s.blockchain.GetDeployedTokens()
+	for _, token := range tokens {
+		tokenBalance := s.blockchain.GetTokenBalance(addressStr, token.Name)
+		if tokenBalance > 0 {
+			tokenBalances[token.Name] = tokenBalance
+		}
+	}
+
 	return &RPCResponse{
 		JSONRPC: "2.0",
 		Result: map[string]interface{}{
@@ -3198,6 +3292,7 @@ func (s *ServerV2) handleGetAddressInfo(req *RPCRequest) *RPCResponse {
 			"receivedCount":    receivedCount,
 			"totalSent":        totalSent,
 			"totalReceived":    totalReceived,
+			"tokenBalances":    tokenBalances, // Include token balances
 		},
 		ID: req.ID,
 	}
@@ -3236,7 +3331,42 @@ func (s *ServerV2) handleGetAddressTransactions(req *RPCRequest) *RPCResponse {
 	address := core.AddressFromString(addressStr)
 
 	// Get transactions
-	transactions := s.blockchain.GetAddressTransactions(address)
+	allTransactions := s.blockchain.GetAddressTransactions(address)
+
+	// Parse pagination parameters (limit and offset)
+	limit := 10 // Default: 10 transactions per page
+	offset := 0 // Default: start from beginning
+
+	if limitParam, ok := params["limit"].(float64); ok {
+		limit = int(limitParam)
+		if limit < 1 {
+			limit = 10
+		}
+		if limit > 100 {
+			limit = 100 // Max 100 transactions per page
+		}
+	}
+
+	if offsetParam, ok := params["offset"].(float64); ok {
+		offset = int(offsetParam)
+		if offset < 0 {
+			offset = 0
+		}
+	}
+
+	// Apply pagination
+	totalCount := len(allTransactions)
+	startIdx := offset
+	endIdx := offset + limit
+	if endIdx > totalCount {
+		endIdx = totalCount
+	}
+	if startIdx > totalCount {
+		startIdx = totalCount
+		endIdx = totalCount
+	}
+
+	transactions := allTransactions[startIdx:endIdx]
 
 	// Convert to JSON-compatible format
 	txList := make([]map[string]interface{}, 0, len(transactions))
@@ -3248,6 +3378,23 @@ func (s *ServerV2) handleGetAddressTransactions(req *RPCRequest) *RPCResponse {
 			"amount":    tx.Amount,
 			"fee":       tx.Fee,
 			"timestamp": tx.Timestamp.Unix(),
+			"data":      hex.EncodeToString(tx.Data), // Include transaction data for token transfers
+		}
+
+		// Check if this is a token transfer transaction
+		if len(tx.Data) > 0 {
+			var tokenData map[string]interface{}
+			if err := json.Unmarshal(tx.Data, &tokenData); err == nil {
+				if txType, ok := tokenData["type"].(string); ok && txType == "token_transfer" {
+					txMap["isTokenTransfer"] = true
+					if tokenName, ok := tokenData["tokenName"].(string); ok {
+						txMap["tokenName"] = tokenName
+					}
+					if amount, ok := tokenData["amount"].(float64); ok {
+						txMap["tokenAmount"] = uint64(amount)
+					}
+				}
+			}
 		}
 
 		// Find block hash for this transaction
@@ -3271,7 +3418,10 @@ func (s *ServerV2) handleGetAddressTransactions(req *RPCRequest) *RPCResponse {
 		JSONRPC: "2.0",
 		Result: map[string]interface{}{
 			"address":      addressStr,
-			"count":        len(transactions),
+			"count":        len(txList),
+			"totalCount":   totalCount,
+			"limit":        limit,
+			"offset":       offset,
 			"transactions": txList,
 		},
 		ID: req.ID,
@@ -3295,6 +3445,11 @@ func (s *ServerV2) serializeBlock(block *core.Block) map[string]interface{} {
 			"fee":       tx.Fee,
 			"nonce":     tx.Nonce,
 			"timestamp": tx.Timestamp.Unix(),
+		}
+
+		// Serialize data field (hex-encoded) - CRITICAL for token deployments
+		if len(tx.Data) > 0 {
+			txMap["data"] = hex.EncodeToString(tx.Data)
 		}
 
 		// Serialize outputs
@@ -3502,4 +3657,405 @@ func (s *ServerV2) checkRateLimit(ip string) bool {
 	// Increment counter
 	limit.Count++
 	return true
+}
+
+// handleGetTokenBalance handles getTokenBalance requests
+func (s *ServerV2) handleGetTokenBalance(req *RPCRequest) *RPCResponse {
+	params, ok := req.Params.(map[string]interface{})
+	if !ok {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "Params must be an object",
+			},
+			ID: req.ID,
+		}
+	}
+
+	addressStr, _ := params["address"].(string)
+	tokenNameStr, _ := params["tokenName"].(string)
+
+	if addressStr == "" || tokenNameStr == "" {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "Address and tokenName are required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	balance := s.blockchain.GetTokenBalance(addressStr, tokenNameStr)
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result:  balance,
+		ID:      req.ID,
+	}
+}
+
+// handleGetTokenBalances returns all token balances for an address
+func (s *ServerV2) handleGetTokenBalances(req *RPCRequest) *RPCResponse {
+	params, ok := req.Params.(map[string]interface{})
+	if !ok {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "Params must be an object",
+			},
+			ID: req.ID,
+		}
+	}
+
+	addressStr, _ := params["address"].(string)
+	if addressStr == "" {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "Address is required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Collect all deployed tokens and their balances for this address
+	tokens := s.blockchain.GetDeployedTokens()
+	results := make([]map[string]interface{}, 0, len(tokens))
+	for _, token := range tokens {
+		balance := s.blockchain.GetTokenBalance(addressStr, token.Name)
+		if balance == 0 {
+			continue
+		}
+		results = append(results, map[string]interface{}{
+			"name":    token.Name,
+			"symbol":  token.Name,
+			"balance": balance,
+		})
+	}
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result:  results,
+		ID:      req.ID,
+	}
+}
+
+// handleSendToken handles sendToken requests
+func (s *ServerV2) handleSendToken(req *RPCRequest) *RPCResponse {
+	params, ok := req.Params.(map[string]interface{})
+	if !ok {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "Params must be an object",
+			},
+			ID: req.ID,
+		}
+	}
+
+	fromStr, _ := params["from"].(string)
+	toStr, _ := params["to"].(string)
+	tokenNameStr, _ := params["tokenName"].(string)
+	amount, _ := params["amount"].(float64)
+
+	if fromStr == "" || toStr == "" || tokenNameStr == "" || amount <= 0 {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "from, to, tokenName, and amount (> 0) are required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Default fee if not provided
+	feeFloat, _ := params["fee"].(float64)
+	fee := uint64(feeFloat)
+	if fee == 0 {
+		fee = 10000 // Default 0.01 KALON fee
+	}
+
+	// Convert addresses
+	fromAddr := core.AddressFromString(fromStr)
+	toAddr := core.AddressFromString(toStr)
+
+	// Create token transfer transaction
+	tx, err := s.blockchain.CreateTokenTransferTransaction(fromAddr, toAddr, tokenNameStr, uint64(amount), fee)
+	if err != nil {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Token transfer transaction creation failed",
+				Data:    err.Error(),
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Serialize transaction for client to sign
+	inputs := make([]interface{}, 0, len(tx.Inputs))
+	for _, input := range tx.Inputs {
+		inputs = append(inputs, map[string]interface{}{
+			"previousTxHash": hex.EncodeToString(input.PreviousTxHash[:]),
+			"index":          input.Index,
+		})
+	}
+
+	outputs := make([]interface{}, 0, len(tx.Outputs))
+	for _, output := range tx.Outputs {
+		outputs = append(outputs, map[string]interface{}{
+			"address": hex.EncodeToString(output.Address[:]),
+			"amount":  output.Amount,
+		})
+	}
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result: map[string]interface{}{
+			"from":      hex.EncodeToString(tx.From[:]),
+			"to":        hex.EncodeToString(tx.To[:]),
+			"tokenName": tokenNameStr,
+			"amount":    amount,
+			"fee":       tx.Fee,
+			"nonce":     tx.Nonce,
+			"gasUsed":   tx.GasUsed,
+			"gasPrice":  tx.GasPrice,
+			"data":      hex.EncodeToString(tx.Data),
+			"hash":      hex.EncodeToString(tx.Hash[:]),
+			"inputs":    inputs,
+			"outputs":   outputs,
+			"timestamp": tx.Timestamp.Unix(),
+		},
+		ID: req.ID,
+	}
+}
+
+// handleGetDeployedTokens handles getDeployedTokens requests
+func (s *ServerV2) handleGetDeployedTokens(req *RPCRequest) *RPCResponse {
+	tokens := s.blockchain.GetDeployedTokens()
+
+	// Convert to JSON-compatible format
+	tokenList := make([]map[string]interface{}, 0, len(tokens))
+	for _, token := range tokens {
+		tokenList = append(tokenList, map[string]interface{}{
+			"name":         token.Name,
+			"description":  token.Description,
+			"totalSupply":  token.TotalSupply,
+			"creator":      token.Creator,
+			"deployHeight": token.DeployHeight,
+			"deployTime":   token.DeployTime.Unix(),
+		})
+	}
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result:  tokenList,
+		ID:      req.ID,
+	}
+}
+
+// handleCheckTokenName checks if a token name is already taken
+func (s *ServerV2) handleCheckTokenName(req *RPCRequest) *RPCResponse {
+	params, ok := req.Params.(map[string]interface{})
+	if !ok {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "Params must be an object",
+			},
+			ID: req.ID,
+		}
+	}
+
+	nameStr, ok := params["name"].(string)
+	if !ok || nameStr == "" {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "Token name is required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Check if token name exists (case-insensitive)
+	exists := s.blockchain.CheckTokenName(nameStr)
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result:  exists,
+		ID:      req.ID,
+	}
+}
+
+// handleDeployToken handles token deployment
+func (s *ServerV2) handleDeployToken(req *RPCRequest) *RPCResponse {
+	params, ok := req.Params.(map[string]interface{})
+	if !ok {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "Params must be an object",
+			},
+			ID: req.ID,
+		}
+	}
+
+	nameStr, _ := params["name"].(string)
+	descriptionStr, _ := params["description"].(string)
+	creatorStr, _ := params["creator"].(string)
+	totalSupply, _ := params["totalSupply"].(float64)
+
+	if nameStr == "" || creatorStr == "" || totalSupply < 1 {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "Token name, creator address, and total supply (>= 1) are required",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Validate token name format
+	if len(nameStr) < 2 || len(nameStr) > 50 {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    "Token name must be between 2 and 50 characters",
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Check if token name already exists
+	if s.blockchain.CheckTokenName(nameStr) {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32602,
+				Message: "Invalid params",
+				Data:    fmt.Sprintf("Token name '%s' already exists", nameStr),
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Deploy token (stores token info)
+	treasuryAddr, err := s.blockchain.DeployToken(nameStr, descriptionStr, uint64(totalSupply), creatorStr)
+	if err != nil {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Internal error",
+				Data:    err.Error(),
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Create prepareTransaction for 10 KALON (10,000,000 micro-KALON) to treasury
+	creatorAddr := core.AddressFromString(creatorStr)
+	treasuryAddress := core.AddressFromString(treasuryAddr)
+	deploymentFee := uint64(10000000) // 10 KALON = 10,000,000 micro-KALON
+	baseFee := uint64(1000000)        // Base transaction fee: 1 tKALON = 1,000,000 micro-KALON
+
+	// Create token deployment data to store in transaction
+	tokenDeploymentData := map[string]interface{}{
+		"type":        "token_deployment",
+		"tokenName":   nameStr,
+		"description": descriptionStr,
+		"totalSupply": totalSupply,
+	}
+	dataBytes, err := json.Marshal(tokenDeploymentData)
+	if err != nil {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Failed to marshal token deployment data",
+				Data:    err.Error(),
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Create transaction with token deployment data
+	tx, err := s.blockchain.CreateTransactionWithData(creatorAddr, treasuryAddress, deploymentFee, baseFee, dataBytes)
+	if err != nil {
+		return &RPCResponse{
+			JSONRPC: "2.0",
+			Error: &RPCError{
+				Code:    -32603,
+				Message: "Transaction creation failed",
+				Data:    err.Error(),
+			},
+			ID: req.ID,
+		}
+	}
+
+	// Serialize transaction for client to sign
+	inputs := make([]interface{}, 0, len(tx.Inputs))
+	for _, input := range tx.Inputs {
+		inputs = append(inputs, map[string]interface{}{
+			"previousTxHash": hex.EncodeToString(input.PreviousTxHash[:]),
+			"index":          input.Index,
+		})
+	}
+
+	outputs := make([]interface{}, 0, len(tx.Outputs))
+	for _, output := range tx.Outputs {
+		outputs = append(outputs, map[string]interface{}{
+			"address": hex.EncodeToString(output.Address[:]),
+			"amount":  output.Amount,
+		})
+	}
+
+	return &RPCResponse{
+		JSONRPC: "2.0",
+		Result: map[string]interface{}{
+			"tokenName":       nameStr,
+			"treasuryAddress": treasuryAddr,
+			"deploymentFee":   deploymentFee,
+			"transaction": map[string]interface{}{
+				"from":      hex.EncodeToString(tx.From[:]),
+				"to":        hex.EncodeToString(tx.To[:]),
+				"amount":    tx.Amount,
+				"fee":       tx.Fee,
+				"nonce":     tx.Nonce,
+				"gasUsed":   tx.GasUsed,
+				"gasPrice":  tx.GasPrice,
+				"data":      hex.EncodeToString(tx.Data),
+				"hash":      hex.EncodeToString(tx.Hash[:]),
+				"inputs":    inputs,
+				"outputs":   outputs,
+				"timestamp": tx.Timestamp.Unix(),
+			},
+			"status": "ready_to_sign",
+		},
+		ID: req.ID,
+	}
 }
