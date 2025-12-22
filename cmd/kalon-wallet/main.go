@@ -306,7 +306,7 @@ func handleExport(wm *WalletManager, args []string) {
 func handleBalance(wm *WalletManager, args []string) {
 	fs := flag.NewFlagSet("balance", flag.ExitOnError)
 	address := fs.String("address", "", "Address to check balance")
-	rpcURL := fs.String("rpc", "http://localhost:16316/rpc", "RPC server URL")
+	rpcURL := fs.String("rpc", defaultRPC, "RPC server URL")
 	fs.Parse(args)
 
 	// Ensure RPC URL has /rpc endpoint
@@ -561,12 +561,12 @@ func handleSend(wm *WalletManager, args []string) {
 	toFlag := fs.String("to", "", "Recipient address or wallet file")
 	amountFlag := fs.Uint64("amount", 0, "Amount to send (micro-KALON)")
 	feeFlag := fs.Uint64("fee", 0, "Transaction fee (micro-KALON, default: 100000)")
-	rpcURLFlag := fs.String("rpc", "", "RPC server URL (default: http://localhost:16316/rpc)")
+	rpcURLFlag := fs.String("rpc", "", "RPC server URL (default: https://explorer.kalon-network.com/rpc)")
 	fs.Parse(args)
 
 	reader := bufio.NewReader(os.Stdin)
 	// Use default RPC if not provided
-	rpcURL := "http://localhost:16316/rpc"
+	rpcURL := defaultRPC
 	if *rpcURLFlag != "" {
 		rpcURL = *rpcURLFlag
 	}
@@ -726,12 +726,12 @@ func handleSendToken(wm *WalletManager, args []string) {
 	toFlag := fs.String("to", "", "Recipient address or wallet file")
 	tokenFlag := fs.String("token", "", "Token name to send")
 	amountFlag := fs.Uint64("amount", 0, "Amount to send")
-	rpcURLFlag := fs.String("rpc", "", "RPC server URL (default: http://localhost:16316/rpc)")
+	rpcURLFlag := fs.String("rpc", "", "RPC server URL (default: https://explorer.kalon-network.com/rpc)")
 	fs.Parse(args)
 
 	reader := bufio.NewReader(os.Stdin)
 	// Use default RPC if not provided
-	rpcURL := "http://localhost:16316/rpc"
+	rpcURL := defaultRPC
 	if *rpcURLFlag != "" {
 		rpcURL = *rpcURLFlag
 	}
@@ -872,7 +872,7 @@ func handleSendToken(wm *WalletManager, args []string) {
 		fmt.Printf("Select token (1-%d): ", len(availableTokens))
 		input, _ := reader.ReadString('\n')
 		input = strings.TrimSpace(input)
-		
+
 		index, err := strconv.Atoi(input)
 		if err != nil || index < 1 || index > len(availableTokens) {
 			log.Fatalf("Invalid selection: %s", input)
@@ -993,11 +993,11 @@ func sendTokenTransfer(rpcURL string, fromAddress, toAddress, tokenName string, 
 		JSONRPC: "2.0",
 		Method:  "sendToken",
 		Params: map[string]interface{}{
-			"from":     fromAddress,
-			"to":       toAddress,
+			"from":      fromAddress,
+			"to":        toAddress,
 			"tokenName": tokenName,
-			"amount":   amount,
-			"fee":      fee,
+			"amount":    amount,
+			"fee":       fee,
 		},
 		ID: 1,
 	}
@@ -1224,7 +1224,7 @@ func formatTokenAmount(amount uint64) string {
 	if len(amountStr) <= 3 {
 		return amountStr
 	}
-	
+
 	// Add thousand separators
 	var result strings.Builder
 	for i, digit := range amountStr {
@@ -1243,12 +1243,12 @@ func handleDeployToken(wm *WalletManager, args []string) {
 	nameFlag := fs.String("name", "", "Token name")
 	descriptionFlag := fs.String("description", "", "Token description")
 	totalSupplyFlag := fs.Uint64("totalSupply", 0, "Total supply (amount)")
-	rpcURLFlag := fs.String("rpc", "", "RPC server URL (default: http://localhost:16316/rpc)")
+	rpcURLFlag := fs.String("rpc", "", "RPC server URL (default: https://explorer.kalon-network.com/rpc)")
 	fs.Parse(args)
 
 	reader := bufio.NewReader(os.Stdin)
 	// Use default RPC if not provided
-	rpcURL := "http://localhost:16316/rpc"
+	rpcURL := defaultRPC
 	if *rpcURLFlag != "" {
 		rpcURL = *rpcURLFlag
 	}
@@ -1438,7 +1438,7 @@ func deployToken(rpcURL string, creatorAddress, tokenName, tokenDescription stri
 
 	// Build transaction from server response
 	tx := &core.Transaction{}
-	
+
 	// CRITICAL: Store fee from transaction data BEFORE signing (for deployToken)
 	var transactionFee uint64
 
