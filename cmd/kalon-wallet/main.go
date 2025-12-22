@@ -19,6 +19,8 @@ import (
 	"github.com/kalon-network/kalon/crypto"
 )
 
+const defaultRPC = "https://explorer.kalon-network.com/rpc"
+
 var version = "1.0.2"
 
 // WalletManager handles wallet operations
